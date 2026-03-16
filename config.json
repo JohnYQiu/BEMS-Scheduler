@@ -1,0 +1,64 @@
+{
+  "block_start": "2026-03-08",
+  "block_end": "2026-04-07",
+  "form_csv": "form_responses.csv",
+  "output_csv": "schedule_output.csv",
+  "random_seed": 42,
+  "blackout_periods": [
+  {"start_date": "2026-03-20", "start_shift": "NIGHT", "end_date": "2026-03-29", "end_shift": "NIGHT"}
+  ],
+  "non_als_shifts": [
+    {
+      "date": "2026-03-11",
+      "shift": "AM"
+    },
+    {
+      "date": "2026-03-11",
+      "shift": "PM"
+    },
+    {
+      "date": "2026-03-11",
+      "shift": "NIGHT"
+    },
+    {
+      "date": "2026-03-13",
+      "shift": "AM"
+    },
+    {
+      "date": "2026-03-13",
+      "shift": "PM"
+    },
+    {
+      "date": "2026-03-13",
+      "shift": "NIGHT"
+    },
+    {
+      "date": "2026-03-14",
+      "shift": "DAY"
+    },
+    {
+      "date": "2026-03-20",
+      "shift": "AM"
+    },
+    {
+      "date": "2026-03-20",
+      "shift": "PM"
+    },
+    {
+      "date": "2026-04-02",
+      "shift": "AM"
+    },
+    {
+      "date": "2026-04-02",
+      "shift": "PM"
+    },
+    {
+      "date": "2026-04-04",
+      "shift": "DAY"
+    },
+    {
+      "date": "2026-04-04",
+      "shift": "NIGHT"
+    }
+  ]
+}

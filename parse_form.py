@@ -169,6 +169,22 @@ def _parse_shifts_from_cell(cell: str) -> list[str]:
     return found
 
 
+def _parse_specific_dates(cell: str, year: int) -> list:
+    """
+    Parse a weekend column cell containing specific available dates.
+    Handles: "3/14", "3/14, 4/4", "Not Available", blank.
+    Returns a list of date objects.
+    """
+    if not cell or cell.strip().lower() in ("not available", "n/a", "na", "no", ""):
+        return []
+    dates = []
+    for m, d in re.findall(r"(\d{1,2})/(\d{1,2})", cell):
+        try:
+            dates.append(date(year, int(m), int(d)))
+        except ValueError:
+            pass
+    return dates
+
 def expand_availability(
     weekly_avail: dict,        # {"Monday": ["AM","PM"], "Saturday": ["DAY"], ...}
     block_start: date,
@@ -305,39 +321,37 @@ def load_responses(
         weekly["Thursday"]  = _parse_shifts_from_cell(safe(row, idx_thursday))
         weekly["Friday"]    = _parse_shifts_from_cell(safe(row, idx_friday))
 
-        # Friday NIGHT is a separate column — append to Friday if present
-        fri_night_cell = safe(row, idx_fri_night)
-        if fri_night_cell and fri_night_cell.lower() not in ("not available", "n/a", "na", ""):
-            # Cell value is a specific date like "4/3" meaning they marked that weekend date
-            # OR it could be a date indicating they are available on ALL Friday nights
-            # In the real form, the value is a specific date they're available (e.g. "4/3")
-            # We treat any non-empty, non-NA value as available for ALL Friday NIGHTs in block
-            if "NIGHT" not in weekly["Friday"]:
-                weekly["Friday"].append("NIGHT")
-
-        # Saturday DAY / NIGHT
-        sat_day_cell   = safe(row, idx_sat_day)
-        sat_night_cell = safe(row, idx_sat_night)
-        sat_shifts = []
-        if sat_day_cell and sat_day_cell.lower() not in ("not available", "n/a", "na", ""):
-            sat_shifts.append("DAY")
-        if sat_night_cell and sat_night_cell.lower() not in ("not available", "n/a", "na", ""):
-            sat_shifts.append("NIGHT")
-        weekly["Saturday"] = sat_shifts
-
-        # Sunday DAY (the Sunday DAY column is separate from the general Sunday column)
-        sun_day_cell = safe(row, idx_sun_day)
-        sun_day_avail = (
-            sun_day_cell and
-            sun_day_cell.lower() not in ("not available", "n/a", "na", "")
-        )
-        if sun_day_avail and "DAY" not in weekly["Sunday"]:
-            weekly["Sunday"].append("DAY")
-
-        # Expand to concrete dates
+        # Expand weekday recurring availability to concrete dates
         available = expand_availability(
             weekly, block_start, block_end, blackout_slots, blackout_dates
         )
+
+        # Weekend columns contain specific dates, not recurring weekly flags.
+        # Parse each cell as an explicit list of dates and add directly.
+
+        # Friday NIGHT — specific dates volunteer is available
+        for d in _parse_specific_dates(safe(row, idx_fri_night), year):
+            key = (d, "NIGHT")
+            if d not in blackout_dates and key not in blackout_slots:
+                available.add(key)
+
+        # Saturday DAY — specific dates
+        for d in _parse_specific_dates(safe(row, idx_sat_day), year):
+            key = (d, "DAY")
+            if d not in blackout_dates and key not in blackout_slots:
+                available.add(key)
+
+        # Saturday NIGHT — specific dates
+        for d in _parse_specific_dates(safe(row, idx_sat_night), year):
+            key = (d, "NIGHT")
+            if d not in blackout_dates and key not in blackout_slots:
+                available.add(key)
+
+        # Sunday DAY — specific dates
+        for d in _parse_specific_dates(safe(row, idx_sun_day), year):
+            key = (d, "DAY")
+            if d not in blackout_dates and key not in blackout_slots:
+                available.add(key)
 
         v = Volunteer(
             first_name=first,
