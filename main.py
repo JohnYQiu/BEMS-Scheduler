@@ -18,11 +18,12 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-from parse_form  import load_responses
+from parse_form  import load_all_responses
 from validate    import (check_availability_requirements, print_strike_list,
                          check_total_available_hours,    print_hours_warnings,
                          print_availability_summary)
 from scheduler   import run_schedule, _build_blackout_slots
+from campus_scheduler import run_campus_schedule
 from output      import export_schedule_xlsx, print_summary, print_warnings
 
 
@@ -95,7 +96,7 @@ def main():
         print(f"  ERROR: Form CSV not found at '{form_csv}'.")
         sys.exit(1)
 
-    volunteers = load_responses(form_csv, block_start, block_end)
+    volunteers, bert_members = load_all_responses(form_csv, block_start, block_end)
 
     if not volunteers:
         print("  ERROR: No Ambulance EMT volunteers found.")
@@ -114,11 +115,20 @@ def main():
     all_shifts = run_schedule(volunteers, schedule_dates, als_shifts,
                               blackout_slots)
 
+    print("▶  Running campus responder scheduler...")
+    campus_shifts = run_campus_schedule(volunteers, bert_members, schedule_dates, responders_per_block=2)
+
     # ── Step 4: Output ────────────────────────────────────────────────────────
     print_summary(all_shifts, volunteers)
     print_warnings(all_shifts)
     print("▶  Exporting...")
-    export_schedule_xlsx(all_shifts, volunteers, output_csv, violations=violations)
+    export_schedule_xlsx(
+        all_shifts,
+        volunteers + bert_members,
+        output_csv,
+        violations=violations,
+        campus_shifts=campus_shifts,
+    )
     print("✓  Done.\n")
 
 

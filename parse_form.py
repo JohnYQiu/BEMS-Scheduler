@@ -3,11 +3,11 @@ parse_form.py
 =============
 Reads the Google Form CSV export and returns a list of Volunteer objects.
 Handles:
-  - Filtering out BERT members (only Ambulance EMTs are scheduled)
+  - Parsing Ambulance EMT and BERT submissions
   - Duplicate submissions (keeps most recent by timestamp)
   - Normalising driver status → EVDT / Auth / EMT
-  - Expanding day-of-week availability into concrete (date, shift) tuples
-  - Parsing freeform blackout date strings
+  - Expanding day-of-week availability into concrete (date, shift/block) tuples
+  - Parsing freeform blackout date strings for both ambulance and campus blocks
 """
 
 import csv
@@ -51,6 +51,10 @@ COL_BLACKOUT = "Enter dates and shifts that you know you cannot work"
 ROLE_EMT  = "Ambulance EMT"
 ROLE_BERT = "BERT Member Only"
 
+# Campus response blocks (weekdays only)
+CAMPUS_BLOCKS = ("A", "B", "C", "D")  # 07–10, 10–13, 13–16, 16–19
+CAMPUS_BLOCK_HOURS = 3
+
 
 # ── Shift hours lookup ────────────────────────────────────────────────────────
 SHIFT_HOURS = {"AM": 6, "PM": 6, "NIGHT": 12, "DAY": 12}
@@ -68,6 +72,9 @@ class Volunteer:
     blackout_dates:  set = field(default_factory=set)   # whole days off {date, ...}
     scheduled_hours: int = 0
     scheduled_shifts: list = field(default_factory=list)
+    campus_available: set = field(default_factory=set)  # {(date, block), ...} block ∈ A/B/C/D
+    campus_scheduled_hours: int = 0
+    campus_scheduled_shifts: list = field(default_factory=list)  # {(date, block), ...}
 
     @property
     def full_name(self): return f"{self.first_name} {self.last_name}"
@@ -75,6 +82,21 @@ class Volunteer:
     def is_evdt(self): return self.certification == "EVDT"
     @property
     def is_auth(self): return self.certification in ("EVDT", "Auth")
+
+
+@dataclass
+class BertMember:
+    first_name:      str
+    last_name:       str
+    email:           str
+    campus_available: set = field(default_factory=set)  # {(date, block), ...}
+    blackout_slots:  set = field(default_factory=set)  # {(date, block), ...} for campus blocks
+    blackout_dates:  set = field(default_factory=set)  # whole days off {date, ...}
+    campus_scheduled_hours: int = 0
+    campus_scheduled_shifts: list = field(default_factory=list)
+
+    @property
+    def full_name(self): return f"{self.first_name} {self.last_name}"
 
 
 # ── Driver status normaliser ──────────────────────────────────────────────────
@@ -104,7 +126,8 @@ def parse_blackouts(raw: str, year: int) -> tuple[set, set]:
     if not raw or raw.strip().upper() in ("N/A", "NA", ""):
         return slots, days
 
-    shift_map = {"AM": "AM", "PM": "PM", "NIGHT": "NIGHT", "DAY": "DAY"}
+    shift_map = {"AM": "AM", "PM": "PM", "NIGHT": "NIGHT", "DAY": "DAY",
+                 "A": "A", "B": "B", "C": "C", "D": "D"}
 
     # Split on semicolons or newlines
     entries = re.split(r"[;\n]+", raw)
@@ -115,7 +138,7 @@ def parse_blackouts(raw: str, year: int) -> tuple[set, set]:
 
         # Look for shift keywords in this entry
         found_shifts = []
-        for token in re.findall(r"\b(AM|PM|NIGHT|DAY)\b", entry, re.IGNORECASE):
+        for token in re.findall(r"\b(AM|PM|NIGHT|DAY|A|B|C|D)\b", entry, re.IGNORECASE):
             s = shift_map.get(token.upper())
             if s:
                 found_shifts.append(s)
@@ -169,6 +192,18 @@ def _parse_shifts_from_cell(cell: str) -> list[str]:
     return found
 
 
+def _parse_blocks_from_cell(cell: str) -> list[str]:
+    """Extract campus blocks from a cell like 'C (1300-1600), D (1600-1900)'."""
+    if not cell or cell.strip().lower() in ("not available", "n/a", "na", "no", ""):
+        return []
+    found: list[str] = []
+    for token in re.findall(r"\b([ABCD])\b", cell, re.IGNORECASE):
+        b = token.upper()
+        if b in CAMPUS_BLOCKS and b not in found:
+            found.append(b)
+    return found
+
+
 def _parse_specific_dates(cell: str, year: int) -> list:
     """
     Parse a weekend column cell containing specific available dates.
@@ -211,6 +246,69 @@ def expand_availability(
     return result
 
 
+def expand_campus_availability(
+    weekly_blocks: dict,        # {"Monday": ["A","B"], ...}
+    block_start: date,
+    block_end:   date,
+    blackout_slots: set,
+    blackout_dates: set,
+) -> set:
+    """Expand recurring weekday campus blocks to concrete (date, block) tuples."""
+    DOW_NAMES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+    result = set()
+    current = block_start
+    while current <= block_end:
+        dow_name = DOW_NAMES[current.weekday()]
+        if current.weekday() < 5:
+            blocks = weekly_blocks.get(dow_name, [])
+            for b in blocks:
+                key = (current, b)
+                if current not in blackout_dates and key not in blackout_slots:
+                    result.add(key)
+        current += timedelta(days=1)
+    return result
+
+
+def infer_campus_availability_for_ambulance(v: Volunteer) -> set:
+    """
+    Infer campus responder availability from ambulance availability:
+      - AM => A + B
+      - PM => C + D
+    Apply ambulance blackouts to the inferred campus blocks.
+    """
+    result = set()
+    for (d, s) in v.available:
+        if d.weekday() >= 5:
+            continue
+        if s == "AM":
+            result.add((d, "A"))
+            result.add((d, "B"))
+        elif s == "PM":
+            result.add((d, "C"))
+            result.add((d, "D"))
+
+    # Translate ambulance blackout slots/dates into campus blocks
+    for bd in v.blackout_dates:
+        if bd.weekday() < 5:
+            for b in CAMPUS_BLOCKS:
+                result.discard((bd, b))
+
+    for (d, s) in v.blackout_slots:
+        if d.weekday() >= 5:
+            continue
+        if s == "AM":
+            result.discard((d, "A"))
+            result.discard((d, "B"))
+        elif s == "PM":
+            result.discard((d, "C"))
+            result.discard((d, "D"))
+        elif s == "DAY":
+            for b in CAMPUS_BLOCKS:
+                result.discard((d, b))
+
+    return result
+
+
 # ── Column finder ─────────────────────────────────────────────────────────────
 def _find_col(headers: list[str], keyword: str, occurrence: int = 0) -> int:
     """Return index of the `occurrence`-th header containing `keyword`."""
@@ -224,15 +322,12 @@ def _find_col(headers: list[str], keyword: str, occurrence: int = 0) -> int:
 
 
 # ── Main loader ───────────────────────────────────────────────────────────────
-def load_responses(
+def load_all_responses(
     csv_path: str,
     block_start: date,
     block_end:   date,
-) -> list[Volunteer]:
-    """
-    Read the Google Form CSV and return a list of Volunteer objects
-    (Ambulance EMTs only, deduplicated by email keeping most recent).
-    """
+) -> tuple[list[Volunteer], list[BertMember]]:
+    """Read the Google Form CSV and return (ambulance_volunteers, bert_members)."""
     year = block_start.year
 
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
@@ -254,6 +349,7 @@ def load_responses(
     idx_first   = _find_col(headers, "First Name", occurrence=0)
     idx_driver  = _find_col(headers, "Driver Status")
     idx_blackout = _find_col(headers, "Enter dates and shifts that you know you cannot work", occurrence=0)
+    idx_blackout_bert = _find_col(headers, "Enter dates and shifts that you know you cannot work", occurrence=1)
 
     # Weekday columns: Sunday–Friday (general AM/PM/NIGHT)
     idx_sunday    = _find_col(headers, "Sunday",    occurrence=0)
@@ -269,20 +365,25 @@ def load_responses(
     idx_sat_night  = _find_col(headers, "Saturday NIGHT")
     idx_sun_day    = _find_col(headers, "Sunday DAY")
 
+    # BERT section columns (campus responder availability)
+    idx_last_bert  = _find_col(headers, "Last Name",  occurrence=1)
+    idx_first_bert = _find_col(headers, "First Name", occurrence=1)
+    idx_mon_bert   = _find_col(headers, "Monday",    occurrence=1)
+    idx_tue_bert   = _find_col(headers, "Tuesday",   occurrence=1)
+    idx_wed_bert   = _find_col(headers, "Wednesday", occurrence=1)
+    idx_thu_bert   = _find_col(headers, "Thursday",  occurrence=1)
+    idx_fri_bert   = _find_col(headers, "Friday",    occurrence=1)
+
     def safe(row, idx):
         if idx < 0 or idx >= len(row):
             return ""
         return row[idx].strip()
 
-    # ── Dedup: keep most recent submission per email ───────────────────────
-    latest: dict[str, tuple] = {}  # email → (timestamp, row)
+    # ── Dedup: keep most recent submission per email (separately per role) ─
+    latest_ambulance: dict[str, tuple] = {}  # email → (timestamp, row)
+    latest_bert: dict[str, tuple] = {}       # email → (timestamp, row)
     for row in data_rows:
         role = safe(row, idx_role)
-        if ROLE_BERT.lower() in role.lower():
-            continue  # skip BERT entirely
-        if ROLE_EMT.lower() not in role.lower():
-            continue  # skip unknown roles
-
         email = safe(row, idx_email).lower()
         if not email:
             continue
@@ -293,11 +394,15 @@ def load_responses(
         except ValueError:
             ts = datetime.min
 
-        if email not in latest or ts > latest[email][0]:
-            latest[email] = (ts, row)
+        if ROLE_BERT.lower() in role.lower():
+            if email not in latest_bert or ts > latest_bert[email][0]:
+                latest_bert[email] = (ts, row)
+        elif ROLE_EMT.lower() in role.lower():
+            if email not in latest_ambulance or ts > latest_ambulance[email][0]:
+                latest_ambulance[email] = (ts, row)
 
-    volunteers = []
-    for email, (_, row) in latest.items():
+    volunteers: list[Volunteer] = []
+    for email, (_, row) in latest_ambulance.items():
         # Basic info
         first = safe(row, idx_first)
         last  = safe(row, idx_last)
@@ -362,7 +467,44 @@ def load_responses(
             blackout_slots=blackout_slots,
             blackout_dates=blackout_dates,
         )
+        v.campus_available = infer_campus_availability_for_ambulance(v)
         volunteers.append(v)
 
+    bert_members: list[BertMember] = []
+    for email, (_, row) in latest_bert.items():
+        first = safe(row, idx_first_bert)
+        last  = safe(row, idx_last_bert)
+
+        blackout_raw = safe(row, idx_blackout_bert)
+        blackout_slots, blackout_dates = parse_blackouts(blackout_raw, year)
+
+        weekly_blocks: dict[str, list] = {}
+        weekly_blocks["Monday"]    = _parse_blocks_from_cell(safe(row, idx_mon_bert))
+        weekly_blocks["Tuesday"]   = _parse_blocks_from_cell(safe(row, idx_tue_bert))
+        weekly_blocks["Wednesday"] = _parse_blocks_from_cell(safe(row, idx_wed_bert))
+        weekly_blocks["Thursday"]  = _parse_blocks_from_cell(safe(row, idx_thu_bert))
+        weekly_blocks["Friday"]    = _parse_blocks_from_cell(safe(row, idx_fri_bert))
+
+        campus_available = expand_campus_availability(
+            weekly_blocks, block_start, block_end, blackout_slots, blackout_dates
+        )
+
+        b = BertMember(
+            first_name=first,
+            last_name=last,
+            email=email,
+            campus_available=campus_available,
+            blackout_slots=blackout_slots,
+            blackout_dates=blackout_dates,
+        )
+        bert_members.append(b)
+
     print(f"  Loaded {len(volunteers)} Ambulance EMT volunteers from form.")
+    print(f"  Loaded {len(bert_members)} BERT members from form.")
+    return volunteers, bert_members
+
+
+def load_responses(csv_path: str, block_start: date, block_end: date) -> list[Volunteer]:
+    """Backwards-compatible: return only ambulance volunteers."""
+    volunteers, _ = load_all_responses(csv_path, block_start, block_end)
     return volunteers
