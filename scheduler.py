@@ -1,43 +1,21 @@
 """
-scheduler.py
-============
-Core scheduling engine for Brown EMS.
-
-Slot structure (upgrades allowed, never downgrade):
-  Weekday (3 slots):
-    Slot 1: EVDT only       (EVDT preferred on ALS shifts — same rule)
-    Slot 2: Auth or higher  (Auth or EVDT)
-    Slot 3: any cert
-
-  Weekend Fri NIGHT – Sun DAY (4 slots):
-    Slot 1: EVDT only
-    Slot 2: Auth or higher
-    Slot 3: any cert
-    Slot 4: any cert
-
-Three-pass scheduling:
-  Pass 1 — minimum crew:  fill Slot 1 + Slot 2 across all shifts
-  Pass 2 — 18h fill-up:   fill remaining slots prioritising volunteers below 18h
-  Pass 3 — top-off:       fill any remaining open slots
-
-Rest rules:
-  - Only one shift per calendar day
-  - After a NIGHT shift, entire next calendar day is blocked
-
-Flags (never downgrades):
-  - Slot 1 empty → ALS/NO EVDT or NO EVDT warning
-  - Slot 2 empty → NO AUTH DRIVER warning
+scheduler.py — Pure Python two-phase scheduler
 """
 
-import random
+import heapq
 from datetime import date, timedelta
 from dataclasses import dataclass, field
 from parse_form import Volunteer, SHIFT_HOURS
 
-MAX_HOURS = 18
+# Scheduling hour rules:
+# - Everyone is capped at SOFT_MAX_HOURS (typically 18) to avoid "everyone goes to 24".
+# - After coverage + min-fill, ONLY volunteers still under MIN_HOURS can be allowed
+#   to go up to HARD_MAX_HOURS (typically 24) to catch up.
+MIN_HOURS = 18
+SOFT_MAX_HOURS = 18
+HARD_MAX_HOURS = 24
 
 
-# ── Shift data class ──────────────────────────────────────────────────────────
 @dataclass
 class Shift:
     date:       date
@@ -51,14 +29,13 @@ class Shift:
     @property
     def is_weekend(self):
         dow = self.date.weekday()
-        if dow == 4 and self.shift_type == "NIGHT": return True  # Fri NIGHT
-        if dow == 5:                                return True  # All Sat
-        if dow == 6 and self.shift_type == "DAY":   return True  # Sun DAY
+        if dow == 4 and self.shift_type == "NIGHT": return True
+        if dow == 5:                                return True
+        if dow == 6 and self.shift_type == "DAY":   return True
         return False
 
     @property
-    def max_slots(self):
-        return 4 if self.is_weekend else 3
+    def max_slots(self): return 4 if self.is_weekend else 3
 
     @property
     def label(self):
@@ -70,212 +47,220 @@ class Shift:
     @property
     def has_auth(self): return any(v.is_auth for v in self.volunteers)
 
-    def slot_1_filled(self): return self.has_evdt
-    def slot_2_filled(self): return self.has_auth
+    def slot_1_filled(self):
+        return any(v.is_evdt for v in self.volunteers)
+
+    def slot_2_filled(self):
+        evdt_count = sum(1 for v in self.volunteers if v.is_evdt)
+        auth_count = sum(1 for v in self.volunteers if v.is_auth)
+        return auth_count > evdt_count
+
+    def open_general_slots(self):
+        """
+        EMT-only slots:
+          - Weekday: 1 EMT
+          - Weekend: 2 EMTs
+        These EMT positions should NOT increase just because the Auth slot is empty.
+        """
+        emt_capacity = 2 if self.is_weekend else 1
+        current_emts = sum(1 for v in self.volunteers if not v.is_auth)
+        return max(0, emt_capacity - current_emts)
 
 
-# ── Slot eligibility ──────────────────────────────────────────────────────────
-def _eligible_for_slot(v: Volunteer, slot: int) -> bool:
-    """
-    slot 1 → EVDT only
-    slot 2 → Auth or higher (Auth or EVDT)
-    slot 3+ → any cert
-    Upgrades are always allowed (e.g. EVDT can fill slot 2 or 3).
-    """
-    if slot == 1: return v.is_evdt
-    if slot == 2: return v.is_auth
-    return True
-
-
-def _next_open_slot(shift: Shift) -> int:
-    """
-    Return the slot number (1-based) that the next volunteer should fill.
-    Slot 1 must be EVDT, Slot 2 must be Auth+, Slots 3+ are open.
-    We determine this by looking at what's already assigned.
-    """
-    evdt_count = sum(1 for v in shift.volunteers if v.is_evdt)
-    auth_count = sum(1 for v in shift.volunteers if v.is_auth and not v.is_evdt)
-
-    # Slot 1 needs an EVDT
-    if evdt_count == 0:
-        return 1
-    # Slot 2 needs an Auth+ (Auth or EVDT not already counted in slot 1)
-    # i.e. we need at least one Auth (non-EVDT) or a second EVDT
-    auth_or_higher = sum(1 for v in shift.volunteers if v.is_auth)
-    if auth_or_higher < 2 and not (evdt_count >= 2):
-        # Slot 2 still open if we don't have a second auth-or-higher
-        if auth_or_higher < 2:
-            return 2
-    return len(shift.volunteers) + 1  # next open general slot
-
-
-# ── Rest rule helpers ─────────────────────────────────────────────────────────
-def is_rest_blocked(v: Volunteer, candidate_date: date, candidate_shift: str) -> bool:
-    for (sched_date, sched_shift) in v.scheduled_shifts:
-        if sched_date == candidate_date:
+def is_rest_blocked(v: Volunteer, d: date, shift_type: str) -> bool:
+    for (sd, ss) in v.scheduled_shifts:
+        if sd == d:
             return True
-        if sched_shift == "NIGHT" and candidate_date == sched_date + timedelta(days=1):
+        if ss == "NIGHT" and d == sd + timedelta(days=1):
             return True
     return False
 
 
-# ── Flexibility calculator ────────────────────────────────────────────────────
-def compute_flexibility(volunteers: list) -> dict:
-    return {v.email: len(v.available) for v in volunteers}
-
-
-# ── Candidate filter ──────────────────────────────────────────────────────────
-def _base_candidates(shift: Shift, vol_list: list, min_hours_only: bool) -> list:
+def _eligible(
+    v: Volunteer,
+    shift: Shift,
+    slot: int,
+    min_hours_only: bool = False,
+    max_hours_for=None,
+) -> bool:
     key = (shift.date, shift.shift_type)
-    return [
-        v for v in vol_list
-        if key in v.available
-        and v.scheduled_hours + shift.hours <= MAX_HOURS
-        and v not in shift.volunteers
-        and not is_rest_blocked(v, shift.date, shift.shift_type)
-        and (not min_hours_only or v.scheduled_hours < MAX_HOURS)
-    ]
+    if key not in v.available:                           return False
+    if len(shift.volunteers) >= shift.max_slots:         return False
+    if max_hours_for is None:
+        max_hours = SOFT_MAX_HOURS
+    else:
+        max_hours = max_hours_for(v)
+    if v.scheduled_hours + shift.hours > max_hours:      return False
+    if min_hours_only and v.scheduled_hours >= MIN_HOURS: return False
+    if v in shift.volunteers:                            return False
+    if slot == 1 and not v.is_evdt:                      return False
+    if slot == 2 and not v.is_auth:                      return False
+    return True
 
 
-def _sort_key(v: Volunteer, flexibility: dict, min_hours_only: bool, rng: random.Random):
-    hours_gap = MAX_HOURS - v.scheduled_hours
-    flex      = flexibility.get(v.email, 999)
-    salt      = rng.random()
-    if min_hours_only:
-        return (-hours_gap, flex, salt)
-    return (flex, salt)
+def _evdt_available(shift: Shift, volunteers: list) -> bool:
+    return any(_eligible(v, shift, 1) for v in volunteers)
 
 
-# ── Slot filler ───────────────────────────────────────────────────────────────
-def _fill_slot(shift: Shift, slot: int, vol_list: list,
-               flexibility: dict, rng: random.Random,
-               min_hours_only: bool = False):
-    """Fill a specific slot number with an eligible volunteer."""
-    candidates = [
-        v for v in _base_candidates(shift, vol_list, min_hours_only)
-        if _eligible_for_slot(v, slot)
-    ]
-    if not candidates:
-        return
-    candidates.sort(key=lambda v: _sort_key(v, flexibility, min_hours_only, rng))
-    v = candidates[0]
-    shift.volunteers.append(v)
-    v.scheduled_hours += shift.hours
-    v.scheduled_shifts.append((shift.date, shift.shift_type))
-
-
-def _fill_open_slots(shift: Shift, vol_list: list,
-                     flexibility: dict, rng: random.Random,
-                     min_hours_only: bool = False):
-    """
-    Fill remaining open slots in strict slot order.
-    Slot 1 (EVDT): if unavailable, leave empty, still fill slots 2+.
-    Slot 2 (Auth+): if unavailable, leave empty, still fill slots 3+.
-    Slots 3/4 (any): fill normally.
-    Never places a volunteer into a slot they are not eligible for.
-    """
-    def best(cands):
-        if not cands:
-            return None
-        cands.sort(key=lambda v: _sort_key(v, flexibility, min_hours_only, rng))
-        return cands[0]
-
-    def assign(v):
-        shift.volunteers.append(v)
-        v.scheduled_hours += shift.hours
-        v.scheduled_shifts.append((shift.date, shift.shift_type))
-
-    # Slot 1: EVDT only
-    if not any(v.is_evdt for v in shift.volunteers):
-        v = best([v for v in _base_candidates(shift, vol_list, min_hours_only) if v.is_evdt])
-        if v:
-            assign(v)
-
-    # Slot 2: Auth+ — leave empty if unavailable, but continue to slots 3+
-    auth_count = sum(1 for v in shift.volunteers if v.is_auth)
-    if auth_count < 2:
-        v = best([v for v in _base_candidates(shift, vol_list, min_hours_only) if v.is_auth])
-        if v:
-            assign(v)
-
-    # Slots 3+ (and 4 for weekends): any cert
-    while len(shift.volunteers) < shift.max_slots:
-        v = best(_base_candidates(shift, vol_list, min_hours_only))
-        if not v:
-            break
-        assign(v)
-
-
-# ── Shift builder ─────────────────────────────────────────────────────────────
 def build_shifts(schedule_dates: list, als_shifts: set) -> dict:
     all_shifts = {}
     for d in schedule_dates:
-        shift_types = ["DAY", "NIGHT"] if d.weekday() >= 5 else ["AM", "PM", "NIGHT"]
-        for s in shift_types:
+        types = ["DAY", "NIGHT"] if d.weekday() >= 5 else ["AM", "PM", "NIGHT"]
+        for s in types:
             key = (d, s)
             all_shifts[key] = Shift(date=d, shift_type=s, has_als=(key in als_shifts))
     return all_shifts
 
 
-def _build_blackout_slots(
-    start_date: date, start_shift: str,
-    end_date: date,   end_shift: str,
-) -> set:
-    """Return all (date, shift) tuples between start and end inclusive."""
+def _build_blackout_slots(start_date, start_shift, end_date, end_shift):
     SHIFT_ORDER = {"AM": 0, "PM": 1, "NIGHT": 2, "DAY": 0}
     result = set()
     current = start_date
     while current <= end_date:
         for s in (["DAY", "NIGHT"] if current.weekday() >= 5 else ["AM", "PM", "NIGHT"]):
-            after_start  = (current > start_date) or (SHIFT_ORDER[s] >= SHIFT_ORDER[start_shift])
-            before_end   = (current < end_date)   or (SHIFT_ORDER[s] <= SHIFT_ORDER[end_shift])
-            if after_start and before_end:
+            if ((current > start_date) or (SHIFT_ORDER[s] >= SHIFT_ORDER[start_shift])) and \
+               ((current < end_date)   or (SHIFT_ORDER[s] <= SHIFT_ORDER[end_shift])):
                 result.add((current, s))
         current += timedelta(days=1)
     return result
 
-# ── Orchestrator ──────────────────────────────────────────────────────────────
-def run_schedule(volunteers: list, schedule_dates: list,
-                 als_shifts: set, blackout_slots: set = None,
-                 seed: int = 42) -> dict:
-    """
-    Three-pass scheduling:
-      Pass 1 — minimum crew: fill Slot 1 (EVDT) and Slot 2 (Auth+) on all shifts
-      Pass 2 — 18h fill-up:  fill remaining slots, prioritise volunteers under 18h
-      Pass 3 — top-off:      fill any remaining open slots
-    ALS shifts processed before non-ALS in every pass.
-    """
-    rng        = random.Random(seed)
+
+def _run_phase(
+    volunteers,
+    shift_keys,
+    all_shifts,
+    phase: str,
+    min_hours_only: bool = False,
+    max_hours_for=None,
+):
+    total_vols  = len(volunteers)
+    flexibility = {v.email: sum(1 for k in shift_keys if k in v.available)
+                   for v in volunteers}
+
+    def want_shift(key):
+        shift = all_shifts[key]
+        # Phase 'evdt': focus on ALS shifts getting an EVDT in slot 1 if possible
+        if phase == 'evdt':
+            if not shift.has_als:
+                return False
+            has_evdt = _evdt_available(shift, volunteers) or shift.slot_1_filled()
+            return has_evdt
+        # Phase 'cover': only consider shifts that currently have nobody assigned
+        if phase == 'cover':
+            return len(shift.volunteers) == 0
+        # Phase 'all': consider all shifts
+        return True
+
+    def score(v, shift, slot):
+        if slot == 1: base = 10000 if shift.has_als else 5000
+        elif slot == 2: base = 4500
+        else: base = 1000
+        max_hours = SOFT_MAX_HOURS if max_hours_for is None else max_hours_for(v)
+        hours_remaining = max_hours - v.scheduled_hours
+        flex = flexibility.get(v.email, 999)
+        return base + hours_remaining * total_vols - flex
+
+    def rebuild():
+        heap = []
+        for key in shift_keys:
+            if not want_shift(key):
+                continue
+            shift = all_shifts[key]
+
+            # Slot 1: EVDT only, used in EVDT-focused phase for ALS shifts
+            if not shift.slot_1_filled() and phase == 'evdt':
+                for i, v in enumerate(volunteers):
+                    if _eligible(v, shift, 1, max_hours_for=max_hours_for):
+                        heapq.heappush(heap, (-score(v, shift, 1), i, key, 1))
+
+            # In the EVDT phase we ONLY place the ALS EVDT (slot 1).
+            # Coverage and filling happen in later phases.
+            if phase == 'evdt':
+                continue
+
+            # Slot 2: Auth/EVDT only
+            if not shift.slot_2_filled():
+                for i, v in enumerate(volunteers):
+                    if _eligible(v, shift, 2, min_hours_only=min_hours_only, max_hours_for=max_hours_for):
+                        heapq.heappush(heap, (-score(v, shift, 2), i, key, 2))
+
+            # Slots 3+: any cert except Auth, fills freely
+            # Slot 1 and slot 2 each reserve one position (filled or not)
+            # So EMTs can fill up to max_slots - 2 positions
+            if shift.open_general_slots() > 0:
+                for i, v in enumerate(volunteers):
+                    if _eligible(v, shift, 3, min_hours_only=min_hours_only, max_hours_for=max_hours_for) and not v.is_auth:
+                        heapq.heappush(heap, (-score(v, shift, 3), i, key, 3))
+
+        return heap
+
+    heap = rebuild()
+    count = 0
+    while heap:
+        neg_score, v_idx, key, slot = heapq.heappop(heap)
+        shift = all_shifts[key]
+        v     = volunteers[v_idx]
+
+        # Revalidate
+        if slot == 1 and (shift.slot_1_filled() or not want_shift(key)): continue
+        if slot == 2 and shift.slot_2_filled():                           continue
+        if slot >= 3 and v.is_auth:                                       continue
+        if slot >= 3 and shift.open_general_slots() <= 0:                 continue
+        if not _eligible(v, shift, slot, min_hours_only=min_hours_only, max_hours_for=max_hours_for): continue
+        if not want_shift(key):                                           continue
+
+        shift.volunteers.append(v)
+        v.scheduled_hours += shift.hours
+        v.scheduled_shifts.append(key)
+        count += 1
+        heap = rebuild()
+
+    return count
+
+
+def run_schedule(volunteers, schedule_dates, als_shifts,
+                 blackout_slots=None, seed=42):
+
     all_shifts = build_shifts(schedule_dates, als_shifts)
     if blackout_slots:
         for key in blackout_slots:
             all_shifts.pop(key, None)
-    flexibility = compute_flexibility(volunteers)
+        for v in volunteers:
+            v.available -= blackout_slots
 
-    def sorted_keys():
-        keys = list(all_shifts.keys())
-        # ALS first, then by date/shift
-        keys.sort(key=lambda k: (0 if all_shifts[k].has_als else 1, k))
-        return keys
+    shift_keys = sorted(all_shifts.keys())
 
-    # ── Pass 1: minimum crew (Slot 1 + Slot 2) ───────────────────────────────
-    for key in sorted_keys():
-        shift = all_shifts[key]
-        # Slot 1: EVDT
-        if not shift.slot_1_filled():
-            _fill_slot(shift, 1, volunteers, flexibility, rng)
-        # Slot 2: Auth+
-        if not shift.slot_2_filled():
-            _fill_slot(shift, 2, volunteers, flexibility, rng)
+    # Phase 1: prioritize ALS shifts getting an EVDT in slot 1 (only place slot 1)
+    print("  Phase 1: ALS shifts — place EVDT (slot 1) where possible...")
+    n1 = _run_phase(volunteers, shift_keys, all_shifts, 'evdt', min_hours_only=False)
 
-    # ── Pass 2: get everyone to 18h (remaining slots, min_hours_only) ────────
-    for key in sorted_keys():
-        shift = all_shifts[key]
-        _fill_open_slots(shift, volunteers, flexibility, rng, min_hours_only=True)
+    # Phase 2: ensure basic coverage — try to give every shift at least one person
+    print("  Phase 2: basic coverage — ensuring every shift has at least one volunteer if possible...")
+    n_cover = _run_phase(volunteers, shift_keys, all_shifts, 'cover', min_hours_only=False)
 
-    # ── Pass 3: top-off (fill any remaining open slots) ──────────────────────
-    for key in sorted_keys():
-        shift = all_shifts[key]
-        _fill_open_slots(shift, volunteers, flexibility, rng, min_hours_only=False)
+    # Phase 3: fill remaining slots up to MIN_HOURS, keeping everyone capped at SOFT_MAX_HOURS
+    print(f"  Phase 3: remaining slots — getting everyone to {MIN_HOURS}h (soft cap {SOFT_MAX_HOURS}h)...")
+    n3 = _run_phase(volunteers, shift_keys, all_shifts, 'all', min_hours_only=True)
 
+    # Phase 4: if anyone is still under MIN_HOURS, allow ONLY those people to go up to HARD_MAX_HOURS
+    unlock = {v.email for v in volunteers if v.scheduled_hours < MIN_HOURS}
+    if unlock:
+        print(f"  Phase 4: catch-up — unlocking up to {HARD_MAX_HOURS}h for {len(unlock)} under-{MIN_HOURS}h volunteer(s)...")
+
+        def max_hours_for(v: Volunteer) -> int:
+            return HARD_MAX_HOURS if v.email in unlock else SOFT_MAX_HOURS
+
+        n4 = _run_phase(
+            volunteers,
+            shift_keys,
+            all_shifts,
+            'all',
+            min_hours_only=False,
+            max_hours_for=max_hours_for,
+        )
+    else:
+        n4 = 0
+
+    total = n1 + n_cover + n3 + n4
+    print(f"  Total: {total} assignments.")
     return all_shifts

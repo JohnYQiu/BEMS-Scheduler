@@ -101,6 +101,7 @@ def print_hours_warnings(warnings: list[dict]):
 def print_availability_summary(
     volunteers: list[Volunteer],
     schedule_dates: list[date],
+    blackout_slots: set = None,
 ):
     """
     Print how many volunteers are available for each shift slot,
@@ -110,8 +111,12 @@ def print_availability_summary(
     counts: dict = defaultdict(int)
     evdt_counts: dict = defaultdict(int)
 
+    blackout_slots = blackout_slots or set()
+
     for v in volunteers:
         for (d, s) in v.available:
+            if (d, s) in blackout_slots:
+                continue
             counts[(d, s)] += 1
             if v.is_evdt:
                 evdt_counts[(d, s)] += 1
