@@ -218,8 +218,7 @@ def _run_phase(
     return count
 
 
-def run_schedule(volunteers, schedule_dates, als_shifts,
-                 blackout_slots=None, seed=42):
+def run_schedule(volunteers, schedule_dates, als_shifts, blackout_slots=None):
 
     all_shifts = build_shifts(schedule_dates, als_shifts)
     if blackout_slots:

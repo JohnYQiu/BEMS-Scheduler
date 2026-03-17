@@ -189,7 +189,32 @@ def _build_warnings_sheet(ws, all_shifts):
             c.border    = BORDER
 
 
-def export_schedule_xlsx(all_shifts, volunteers, output_path):
+def _build_strike_list_sheet(ws, violations):
+    ws.title = "Strike List"
+    ws.freeze_panes = "A2"
+    headers = ["Name", "Email", "Certification", "Missing Requirements"]
+    widths  = [28, 32, 14, 40]
+    _header_row(ws, 1, headers, widths)
+
+    if not violations:
+        c = ws.cell(row=2, column=1, value="✓ All volunteers met the minimum availability requirements.")
+        c.font = _font(bold=True, color="1E7E34")
+        return
+
+    for i, item in enumerate(violations, 2):
+        v = item["volunteer"]
+        missing = ", ".join(item.get("missing", []))
+        bg = C_ALT_ROW if i % 2 == 0 else C_EMT_BG
+        vals = [v.full_name, v.email, v.certification, missing]
+        for col, val in enumerate(vals, 1):
+            c = ws.cell(row=i, column=col, value=val)
+            c.fill      = _fill(bg)
+            c.font      = _font(bold=(col == 1))
+            c.alignment = _align(h="center" if col in (3,) else "left", wrap=(col == 4))
+            c.border    = BORDER
+
+
+def export_schedule_xlsx(all_shifts, volunteers, output_path, violations=None):
     if not output_path.endswith(".xlsx"):
         output_path = output_path.rsplit(".", 1)[0] + ".xlsx"
 
@@ -197,6 +222,7 @@ def export_schedule_xlsx(all_shifts, volunteers, output_path):
     _build_schedule_sheet(wb.active, all_shifts)
     _build_summary_sheet(wb.create_sheet(), volunteers)
     _build_warnings_sheet(wb.create_sheet(), all_shifts)
+    _build_strike_list_sheet(wb.create_sheet(), violations or [])
     wb.save(output_path)
     print(f"  Schedule exported -> {output_path}")
     return output_path

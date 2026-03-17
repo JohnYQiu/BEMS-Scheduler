@@ -59,7 +59,6 @@ def main():
 
     form_csv   = cfg.get("form_csv",   "form_responses.csv")
     output_csv = cfg.get("output_csv", "schedule_output.csv")
-    seed       = cfg.get("random_seed", 42)
 
     # Build full schedule dates
     schedule_dates = [
@@ -113,13 +112,13 @@ def main():
     # ── Step 3: Schedule ──────────────────────────────────────────────────────
     print("▶  Running scheduler...")
     all_shifts = run_schedule(volunteers, schedule_dates, als_shifts,
-                              blackout_slots, seed=seed)
+                              blackout_slots)
 
     # ── Step 4: Output ────────────────────────────────────────────────────────
     print_summary(all_shifts, volunteers)
     print_warnings(all_shifts)
     print("▶  Exporting...")
-    export_schedule_xlsx(all_shifts, volunteers, output_csv)
+    export_schedule_xlsx(all_shifts, volunteers, output_csv, violations=violations)
     print("✓  Done.\n")
 
 

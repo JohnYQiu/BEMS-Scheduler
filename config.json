@@ -3,7 +3,6 @@
   "block_end": "2026-04-07",
   "form_csv": "form_responses.csv",
   "output_csv": "schedule_output.csv",
-  "random_seed": 42,
   "blackout_periods": [
   {"start_date": "2026-03-20", "start_shift": "NIGHT", "end_date": "2026-03-29", "end_shift": "NIGHT"}
   ],
