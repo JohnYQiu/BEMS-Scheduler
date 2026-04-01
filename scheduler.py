@@ -35,7 +35,14 @@ class Shift:
         return False
 
     @property
-    def max_slots(self): return 4 if self.is_weekend else 3
+    def is_weekday_daytime(self) -> bool:
+        return self.date.weekday() < 5 and self.shift_type in ("AM", "PM")
+
+    @property
+    def max_slots(self):
+        if self.is_weekday_daytime:
+            return 2
+        return 4 if self.is_weekend else 3
 
     @property
     def label(self):
@@ -62,6 +69,10 @@ class Shift:
           - Weekend: 2 EMTs
         These EMT positions should NOT increase just because the Auth slot is empty.
         """
+        if self.is_weekday_daytime:
+            # Weekday daytime shifts are 2-person crews and can be any cert mix.
+            # Capacity is handled by max_slots / len(volunteers), not EMT-only slots.
+            return max(0, self.max_slots - len(self.volunteers))
         emt_capacity = 2 if self.is_weekend else 1
         current_emts = sum(1 for v in self.volunteers if not v.is_auth)
         return max(0, emt_capacity - current_emts)
@@ -93,6 +104,12 @@ def _eligible(
     if v.scheduled_hours + shift.hours > max_hours:      return False
     if min_hours_only and v.scheduled_hours >= MIN_HOURS: return False
     if v in shift.volunteers:                            return False
+    if shift.is_weekday_daytime:
+        # Weekday daytime is a 2-person crew (any cert mix).
+        # We only use slot==1 to force EVDT placement for ALS daytime shifts.
+        if slot == 1 and not v.is_evdt:
+            return False
+        return True
     if slot == 1 and not v.is_evdt:                      return False
     if slot == 2 and not v.is_auth:                      return False
     return True
@@ -155,6 +172,10 @@ def _run_phase(
         if slot == 1: base = 10000 if shift.has_als else 5000
         elif slot == 2: base = 4500
         else: base = 1000
+        if shift.is_weekday_daytime and v.is_evdt and slot != 1:
+            # Soft preference: if we're filling a weekday daytime slot, prefer EVDT
+            # when it doesn't harm fairness / hour caps.
+            base += 200
         max_hours = SOFT_MAX_HOURS if max_hours_for is None else max_hours_for(v)
         hours_remaining = max_hours - v.scheduled_hours
         flex = flexibility.get(v.email, 999)
@@ -166,6 +187,22 @@ def _run_phase(
             if not want_shift(key):
                 continue
             shift = all_shifts[key]
+
+            # Weekday daytime: 2-person crew, any cert mix.
+            # ALS weekday daytime still requires at least one EVDT (handled in 'evdt' phase).
+            if shift.is_weekday_daytime:
+                if phase == 'evdt':
+                    if shift.has_als and not shift.slot_1_filled():
+                        for i, v in enumerate(volunteers):
+                            if _eligible(v, shift, 1, max_hours_for=max_hours_for):
+                                heapq.heappush(heap, (-score(v, shift, 1), i, key, 1))
+                    continue
+
+                if len(shift.volunteers) < shift.max_slots:
+                    for i, v in enumerate(volunteers):
+                        if _eligible(v, shift, 3, min_hours_only=min_hours_only, max_hours_for=max_hours_for):
+                            heapq.heappush(heap, (-score(v, shift, 3), i, key, 3))
+                continue
 
             # Slot 1: EVDT only, used in EVDT-focused phase for ALS shifts
             if not shift.slot_1_filled() and phase == 'evdt':
@@ -203,9 +240,10 @@ def _run_phase(
 
         # Revalidate
         if slot == 1 and (shift.slot_1_filled() or not want_shift(key)): continue
-        if slot == 2 and shift.slot_2_filled():                           continue
-        if slot >= 3 and v.is_auth:                                       continue
-        if slot >= 3 and shift.open_general_slots() <= 0:                 continue
+        if not shift.is_weekday_daytime:
+            if slot == 2 and shift.slot_2_filled():                           continue
+            if slot >= 3 and v.is_auth:                                       continue
+            if slot >= 3 and shift.open_general_slots() <= 0:                 continue
         if not _eligible(v, shift, slot, min_hours_only=min_hours_only, max_hours_for=max_hours_for): continue
         if not want_shift(key):                                           continue
 
