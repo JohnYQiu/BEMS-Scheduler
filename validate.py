@@ -71,24 +71,24 @@ def print_strike_list(violations: list[dict]):
 
 # ── Total hours check ─────────────────────────────────────────────────────────
 
-def check_total_available_hours(volunteers: list[Volunteer]) -> list[dict]:
+def check_total_available_hours(volunteers: list[Volunteer], min_hours: int = 18) -> list[dict]:
     """
-    Flag volunteers whose total submitted availability is less than 18 hours.
+    Flag volunteers whose total submitted availability is less than min_hours.
     This is a secondary check — the primary is the category check above.
     """
     warnings = []
     for v in volunteers:
         total = sum(SHIFT_HOURS.get(s, 0) for (_, s) in v.available)
-        if total < 18:
+        if total < min_hours:
             warnings.append({"volunteer": v, "total_hours": total})
     return warnings
 
 
-def print_hours_warnings(warnings: list[dict]):
+def print_hours_warnings(warnings: list[dict], min_hours: int = 18):
     if not warnings:
         return
     print("\n" + "=" * 60)
-    print("LOW AVAILABILITY WARNING — TOTAL HOURS < 18")
+    print(f"LOW AVAILABILITY WARNING — TOTAL HOURS < {min_hours}")
     print("=" * 60)
     for item in warnings:
         v = item["volunteer"]

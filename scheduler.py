@@ -1,19 +1,27 @@
 """
-scheduler.py — Pure Python two-phase scheduler
+scheduler.py — Pure Python multi-phase scheduler
 """
+
+from __future__ import annotations
 
 import heapq
 from datetime import date, timedelta
 from dataclasses import dataclass, field
+from typing import Optional
+
 from parse_form import Volunteer, SHIFT_HOURS
 
-# Scheduling hour rules:
-# - Everyone is capped at SOFT_MAX_HOURS (typically 18) to avoid "everyone goes to 24".
-# - After coverage + min-fill, ONLY volunteers still under MIN_HOURS can be allowed
-#   to go up to HARD_MAX_HOURS (typically 24) to catch up.
-MIN_HOURS = 18
-SOFT_MAX_HOURS = 18
-HARD_MAX_HOURS = 24
+
+@dataclass
+class AmbulanceHourLimits:
+    """
+    target_hours: goal used in phase 3 (min-fill) and phase 4 unlock threshold.
+    soft_max_hours: normal cap before phase 4 catch-up.
+    hard_max_hours: absolute max for volunteers still under target_hours in phase 4.
+    """
+    target_hours: int = 18
+    soft_max_hours: int = 18
+    hard_max_hours: int = 24
 
 
 @dataclass
@@ -39,6 +47,10 @@ class Shift:
         return self.date.weekday() < 5 and self.shift_type in ("AM", "PM")
 
     @property
+    def is_weekend_day(self) -> bool:
+        return self.is_weekend and self.shift_type == "DAY"
+
+    @property
     def max_slots(self):
         if self.is_weekday_daytime:
             return 2
@@ -55,7 +67,10 @@ class Shift:
     def has_auth(self): return any(v.is_auth for v in self.volunteers)
 
     def slot_1_filled(self):
-        return any(v.is_evdt for v in self.volunteers)
+        """ALS: EVDT in reserved slot 1. Non-ALS: any first assignee."""
+        if self.has_als:
+            return any(v.is_evdt for v in self.volunteers)
+        return len(self.volunteers) >= 1
 
     def slot_2_filled(self):
         evdt_count = sum(1 for v in self.volunteers if v.is_evdt)
@@ -64,14 +79,12 @@ class Shift:
 
     def open_general_slots(self):
         """
-        EMT-only slots:
-          - Weekday: 1 EMT
-          - Weekend: 2 EMTs
-        These EMT positions should NOT increase just because the Auth slot is empty.
+        Non-auth EMT slots (weekend / night typed model).
+        Weekday AM/PM uses max_slots and len(volunteers) only.
         """
         if self.is_weekday_daytime:
-            # Weekday daytime shifts are 2-person crews and can be any cert mix.
-            # Capacity is handled by max_slots / len(volunteers), not EMT-only slots.
+            return max(0, self.max_slots - len(self.volunteers))
+        if not self.has_als:
             return max(0, self.max_slots - len(self.volunteers))
         emt_capacity = 2 if self.is_weekend else 1
         current_emts = sum(1 for v in self.volunteers if not v.is_auth)
@@ -93,30 +106,49 @@ def _eligible(
     slot: int,
     min_hours_only: bool = False,
     max_hours_for=None,
+    *,
+    soft_max_hours: int = 18,
+    target_hours: int = 18,
 ) -> bool:
     key = (shift.date, shift.shift_type)
     if key not in v.available:                           return False
     if len(shift.volunteers) >= shift.max_slots:         return False
     if max_hours_for is None:
-        max_hours = SOFT_MAX_HOURS
+        max_hours = soft_max_hours
     else:
         max_hours = max_hours_for(v)
     if v.scheduled_hours + shift.hours > max_hours:      return False
-    if min_hours_only and v.scheduled_hours >= MIN_HOURS: return False
+    if min_hours_only and v.scheduled_hours >= target_hours: return False
     if v in shift.volunteers:                            return False
+
+    # Non-ALS: no EVDT-only slot; any cert in slots 1–2; higher slots are EMT-only (not Auth).
+    if not shift.has_als:
+        if shift.is_weekday_daytime:
+            return True
+        if slot in (1, 2):
+            return True
+        if slot >= 3:
+            return not v.is_auth
+        return True
+
+    # ALS: slot 1 is EVDT-only or left empty (never Auth/EMT in slot 1).
     if shift.is_weekday_daytime:
-        # Weekday daytime is a 2-person crew (any cert mix).
-        # We only use slot==1 to force EVDT placement for ALS daytime shifts.
         if slot == 1 and not v.is_evdt:
             return False
         return True
-    if slot == 1 and not v.is_evdt:                      return False
-    if slot == 2 and not v.is_auth:                      return False
+
+    if slot == 1 and not v.is_evdt:
+        return False
+    if slot == 2 and not v.is_auth:
+        return False
     return True
 
 
-def _evdt_available(shift: Shift, volunteers: list) -> bool:
-    return any(_eligible(v, shift, 1) for v in volunteers)
+def _evdt_available(shift: Shift, volunteers: list, soft_max_hours: int, target_hours: int) -> bool:
+    return any(
+        _eligible(v, shift, 1, soft_max_hours=soft_max_hours, target_hours=target_hours)
+        for v in volunteers
+    )
 
 
 def build_shifts(schedule_dates: list, als_shifts: set) -> dict:
@@ -142,11 +174,20 @@ def _build_blackout_slots(start_date, start_shift, end_date, end_shift):
     return result
 
 
+def _next_slot_for_non_als(shift: Shift) -> int:
+    """Sequential slot index 1..max_slots for relaxed non-ALS night/weekend."""
+    n = len(shift.volunteers)
+    if n >= shift.max_slots:
+        return 0
+    return n + 1
+
+
 def _run_phase(
     volunteers,
     shift_keys,
     all_shifts,
     phase: str,
+    limits: AmbulanceHourLimits,
     min_hours_only: bool = False,
     max_hours_for=None,
 ):
@@ -156,27 +197,24 @@ def _run_phase(
 
     def want_shift(key):
         shift = all_shifts[key]
-        # Phase 'evdt': focus on ALS shifts getting an EVDT in slot 1 if possible
         if phase == 'evdt':
             if not shift.has_als:
                 return False
-            has_evdt = _evdt_available(shift, volunteers) or shift.slot_1_filled()
+            has_evdt = _evdt_available(
+                shift, volunteers, limits.soft_max_hours, limits.target_hours
+            ) or shift.slot_1_filled()
             return has_evdt
-        # Phase 'cover': only consider shifts that currently have nobody assigned
         if phase == 'cover':
             return len(shift.volunteers) == 0
-        # Phase 'all': consider all shifts
         return True
 
     def score(v, shift, slot):
         if slot == 1: base = 10000 if shift.has_als else 5000
         elif slot == 2: base = 4500
         else: base = 1000
-        if shift.is_weekday_daytime and v.is_evdt and slot != 1:
-            # Soft preference: if we're filling a weekday daytime slot, prefer EVDT
-            # when it doesn't harm fairness / hour caps.
+        if shift.is_weekday_daytime and not shift.has_als and v.is_evdt and slot != 1:
             base += 200
-        max_hours = SOFT_MAX_HOURS if max_hours_for is None else max_hours_for(v)
+        max_hours = limits.soft_max_hours if max_hours_for is None else max_hours_for(v)
         hours_remaining = max_hours - v.scheduled_hours
         flex = flexibility.get(v.email, 999)
         return base + hours_remaining * total_vols - flex
@@ -188,45 +226,76 @@ def _run_phase(
                 continue
             shift = all_shifts[key]
 
-            # Weekday daytime: 2-person crew, any cert mix.
-            # ALS weekday daytime still requires at least one EVDT (handled in 'evdt' phase).
+            # Weekday AM/PM
             if shift.is_weekday_daytime:
-                if phase == 'evdt':
-                    if shift.has_als and not shift.slot_1_filled():
+                if shift.has_als:
+                    if phase == 'evdt' and not shift.slot_1_filled():
                         for i, v in enumerate(volunteers):
-                            if _eligible(v, shift, 1, max_hours_for=max_hours_for):
+                            if _eligible(
+                                v, shift, 1, max_hours_for=max_hours_for,
+                                soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+                            ):
                                 heapq.heappush(heap, (-score(v, shift, 1), i, key, 1))
-                    continue
-
-                if len(shift.volunteers) < shift.max_slots:
-                    for i, v in enumerate(volunteers):
-                        if _eligible(v, shift, 3, min_hours_only=min_hours_only, max_hours_for=max_hours_for):
-                            heapq.heappush(heap, (-score(v, shift, 3), i, key, 3))
+                    elif phase != 'evdt' and len(shift.volunteers) < shift.max_slots:
+                        for i, v in enumerate(volunteers):
+                            if _eligible(
+                                v, shift, 3, min_hours_only=min_hours_only, max_hours_for=max_hours_for,
+                                soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+                            ):
+                                heapq.heappush(heap, (-score(v, shift, 3), i, key, 3))
+                else:
+                    if phase == 'evdt':
+                        continue
+                    if len(shift.volunteers) < shift.max_slots:
+                        for i, v in enumerate(volunteers):
+                            if _eligible(
+                                v, shift, 3, min_hours_only=min_hours_only, max_hours_for=max_hours_for,
+                                soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+                            ):
+                                heapq.heappush(heap, (-score(v, shift, 3), i, key, 3))
                 continue
 
-            # Slot 1: EVDT only, used in EVDT-focused phase for ALS shifts
+            # Non-ALS night / weekend (typed slots relaxed: 1–2 any, 3+ EMT-only)
+            if not shift.has_als:
+                if phase == 'evdt':
+                    continue
+                slot = _next_slot_for_non_als(shift)
+                if slot == 0:
+                    continue
+                for i, v in enumerate(volunteers):
+                    if _eligible(
+                        v, shift, slot, min_hours_only=min_hours_only, max_hours_for=max_hours_for,
+                        soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+                    ):
+                        heapq.heappush(heap, (-score(v, shift, slot), i, key, slot))
+                continue
+
+            # ALS weekend DAY / NIGHT — slot 1 EVDT only or empty; then Auth; then EMT slots
             if not shift.slot_1_filled() and phase == 'evdt':
                 for i, v in enumerate(volunteers):
-                    if _eligible(v, shift, 1, max_hours_for=max_hours_for):
+                    if _eligible(
+                        v, shift, 1, max_hours_for=max_hours_for,
+                        soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+                    ):
                         heapq.heappush(heap, (-score(v, shift, 1), i, key, 1))
 
-            # In the EVDT phase we ONLY place the ALS EVDT (slot 1).
-            # Coverage and filling happen in later phases.
             if phase == 'evdt':
                 continue
 
-            # Slot 2: Auth/EVDT only
             if not shift.slot_2_filled():
                 for i, v in enumerate(volunteers):
-                    if _eligible(v, shift, 2, min_hours_only=min_hours_only, max_hours_for=max_hours_for):
+                    if _eligible(
+                        v, shift, 2, min_hours_only=min_hours_only, max_hours_for=max_hours_for,
+                        soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+                    ):
                         heapq.heappush(heap, (-score(v, shift, 2), i, key, 2))
 
-            # Slots 3+: any cert except Auth, fills freely
-            # Slot 1 and slot 2 each reserve one position (filled or not)
-            # So EMTs can fill up to max_slots - 2 positions
             if shift.open_general_slots() > 0:
                 for i, v in enumerate(volunteers):
-                    if _eligible(v, shift, 3, min_hours_only=min_hours_only, max_hours_for=max_hours_for) and not v.is_auth:
+                    if _eligible(
+                        v, shift, 3, min_hours_only=min_hours_only, max_hours_for=max_hours_for,
+                        soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+                    ) and not v.is_auth:
                         heapq.heappush(heap, (-score(v, shift, 3), i, key, 3))
 
         return heap
@@ -238,14 +307,32 @@ def _run_phase(
         shift = all_shifts[key]
         v     = volunteers[v_idx]
 
-        # Revalidate
-        if slot == 1 and (shift.slot_1_filled() or not want_shift(key)): continue
-        if not shift.is_weekday_daytime:
-            if slot == 2 and shift.slot_2_filled():                           continue
-            if slot >= 3 and v.is_auth:                                       continue
-            if slot >= 3 and shift.open_general_slots() <= 0:                 continue
-        if not _eligible(v, shift, slot, min_hours_only=min_hours_only, max_hours_for=max_hours_for): continue
-        if not want_shift(key):                                           continue
+        if shift.is_weekday_daytime:
+            if slot == 1 and (shift.slot_1_filled() or not want_shift(key)):
+                continue
+            if slot == 3 and len(shift.volunteers) >= shift.max_slots:
+                continue
+        elif not shift.has_als:
+            expected = _next_slot_for_non_als(shift)
+            if slot != expected or expected == 0:
+                continue
+        else:
+            if slot == 1 and (shift.slot_1_filled() or not want_shift(key)):
+                continue
+            if slot == 2 and shift.slot_2_filled():
+                continue
+            if slot >= 3 and v.is_auth:
+                continue
+            if slot >= 3 and shift.open_general_slots() <= 0:
+                continue
+
+        if not _eligible(
+            v, shift, slot, min_hours_only=min_hours_only, max_hours_for=max_hours_for,
+            soft_max_hours=limits.soft_max_hours, target_hours=limits.target_hours,
+        ):
+            continue
+        if not want_shift(key):
+            continue
 
         shift.volunteers.append(v)
         v.scheduled_hours += shift.hours
@@ -256,8 +343,14 @@ def _run_phase(
     return count
 
 
-def run_schedule(volunteers, schedule_dates, als_shifts, blackout_slots=None):
-
+def run_schedule(
+    volunteers,
+    schedule_dates,
+    als_shifts,
+    blackout_slots=None,
+    hour_limits: Optional[AmbulanceHourLimits] = None,
+):
+    limits = hour_limits or AmbulanceHourLimits()
     all_shifts = build_shifts(schedule_dates, als_shifts)
     if blackout_slots:
         for key in blackout_slots:
@@ -267,31 +360,34 @@ def run_schedule(volunteers, schedule_dates, als_shifts, blackout_slots=None):
 
     shift_keys = sorted(all_shifts.keys())
 
-    # Phase 1: prioritize ALS shifts getting an EVDT in slot 1 (only place slot 1)
-    print("  Phase 1: ALS shifts — place EVDT (slot 1) where possible...")
-    n1 = _run_phase(volunteers, shift_keys, all_shifts, 'evdt', min_hours_only=False)
+    print("  Phase 1: ALS shifts — place EVDT in slot 1 where possible (otherwise leave blank)...")
+    n1 = _run_phase(volunteers, shift_keys, all_shifts, 'evdt', limits, min_hours_only=False)
 
-    # Phase 2: ensure basic coverage — try to give every shift at least one person
     print("  Phase 2: basic coverage — ensuring every shift has at least one volunteer if possible...")
-    n_cover = _run_phase(volunteers, shift_keys, all_shifts, 'cover', min_hours_only=False)
+    n_cover = _run_phase(volunteers, shift_keys, all_shifts, 'cover', limits, min_hours_only=False)
 
-    # Phase 3: fill remaining slots up to MIN_HOURS, keeping everyone capped at SOFT_MAX_HOURS
-    print(f"  Phase 3: remaining slots — getting everyone to {MIN_HOURS}h (soft cap {SOFT_MAX_HOURS}h)...")
-    n3 = _run_phase(volunteers, shift_keys, all_shifts, 'all', min_hours_only=True)
+    print(
+        f"  Phase 3: remaining slots — getting everyone to {limits.target_hours}h "
+        f"(soft cap {limits.soft_max_hours}h)..."
+    )
+    n3 = _run_phase(volunteers, shift_keys, all_shifts, 'all', limits, min_hours_only=True)
 
-    # Phase 4: if anyone is still under MIN_HOURS, allow ONLY those people to go up to HARD_MAX_HOURS
-    unlock = {v.email for v in volunteers if v.scheduled_hours < MIN_HOURS}
+    unlock = {v.email for v in volunteers if v.scheduled_hours < limits.target_hours}
     if unlock:
-        print(f"  Phase 4: catch-up — unlocking up to {HARD_MAX_HOURS}h for {len(unlock)} under-{MIN_HOURS}h volunteer(s)...")
+        print(
+            f"  Phase 4: catch-up — unlocking up to {limits.hard_max_hours}h for "
+            f"{len(unlock)} under-{limits.target_hours}h volunteer(s)..."
+        )
 
         def max_hours_for(v: Volunteer) -> int:
-            return HARD_MAX_HOURS if v.email in unlock else SOFT_MAX_HOURS
+            return limits.hard_max_hours if v.email in unlock else limits.soft_max_hours
 
         n4 = _run_phase(
             volunteers,
             shift_keys,
             all_shifts,
             'all',
+            limits,
             min_hours_only=False,
             max_hours_for=max_hours_for,
         )

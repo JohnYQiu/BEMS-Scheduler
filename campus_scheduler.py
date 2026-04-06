@@ -16,8 +16,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 import heapq
+from typing import Optional
 
 from parse_form import Volunteer, BertMember, CAMPUS_BLOCKS, CAMPUS_BLOCK_HOURS
+
+
+@dataclass
+class CampusHourCaps:
+    """Max campus response hours per block role (3h per A/B/C/D block)."""
+    ambulance_emt_max_hours: int = 6
+    bert_max_hours: int = 9
 
 
 @dataclass
@@ -52,11 +60,10 @@ def _ambulance_conflict(v: Volunteer, d: date, block: str) -> bool:
     return False
 
 
-def _campus_cap_for(person) -> int:
-    # Ambulance EMTs: cap 6 hours; BERT: cap 9 hours
+def _campus_cap_for(person, caps: CampusHourCaps) -> int:
     if isinstance(person, Volunteer):
-        return 6
-    return 9
+        return caps.ambulance_emt_max_hours
+    return caps.bert_max_hours
 
 
 def _campus_hours(person) -> int:
@@ -67,13 +74,13 @@ def _campus_available(person, key) -> bool:
     return key in getattr(person, "campus_available", set())
 
 
-def _eligible(person, key, shift: CampusShift) -> bool:
+def _eligible(person, key, shift: CampusShift, caps: CampusHourCaps) -> bool:
     d, block = key
     if not _campus_available(person, key):
         return False
     if person in shift.responders:
         return False
-    if _campus_hours(person) + CAMPUS_BLOCK_HOURS > _campus_cap_for(person):
+    if _campus_hours(person) + CAMPUS_BLOCK_HOURS > _campus_cap_for(person, caps):
         return False
     if isinstance(person, Volunteer) and _ambulance_conflict(person, d, block):
         return False
@@ -85,6 +92,7 @@ def run_campus_schedule(
     bert_members: list[BertMember],
     schedule_dates: list[date],
     responders_per_block: int = 2,
+    hour_caps: Optional[CampusHourCaps] = None,
 ) -> dict:
     """
     Returns dict[(date, block)] -> CampusShift
@@ -94,6 +102,7 @@ def run_campus_schedule(
       - Prefer assigning people who are below their cap and have low flexibility.
     """
     people = list(ambulance_volunteers) + list(bert_members)
+    caps = hour_caps or CampusHourCaps()
 
     # Build shifts (weekdays only)
     shifts: dict = {}
@@ -107,7 +116,7 @@ def run_campus_schedule(
     flex = {getattr(p, "email", str(i)): len(getattr(p, "campus_available", set())) for i, p in enumerate(people)}
 
     def score(person, shift: CampusShift) -> int:
-        cap = _campus_cap_for(person)
+        cap = _campus_cap_for(person, caps)
         remaining = cap - _campus_hours(person)
         # Higher is better:
         # - prioritize those with remaining capacity
@@ -121,7 +130,7 @@ def run_campus_schedule(
             if len(shift.responders) >= responders_per_block:
                 continue
             for i, person in enumerate(people):
-                if _eligible(person, key, shift):
+                if _eligible(person, key, shift, caps):
                     heapq.heappush(heap, (-score(person, shift), i, key))
         return heap
 
@@ -134,7 +143,7 @@ def run_campus_schedule(
 
         if len(shift.responders) >= responders_per_block:
             continue
-        if not _eligible(person, key, shift):
+        if not _eligible(person, key, shift, caps):
             continue
 
         shift.responders.append(person)

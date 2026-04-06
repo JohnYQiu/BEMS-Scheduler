@@ -6,7 +6,7 @@ Handles all output for the Brown EMS scheduler:
       1. Schedule         — week-by-week ambulance grid (Sun → Sat)
       2. Campus Response  — week-by-week campus responder grid (Sun → Sat)
       3. Hour Summary     — totals (ambulance + campus)
-      4. Warnings         — ALS shifts missing EVDT, unfilled shifts, no auth driver
+      4. Warnings         — unfilled shifts, ALS without EVDT, no auth driver (night/weekend only)
       5. Strike List      — missing minimum availability categories
   - Brief terminal summary
 """
@@ -68,6 +68,13 @@ def _header_row(ws, row, values, widths=None):
 def _week_start_sunday(d: date) -> date:
     # Python weekday: Mon=0 ... Sun=6
     return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def _warn_no_auth_driver(shift: Shift) -> bool:
+    """Weekday AM/PM crews do not require a separate auth-driver warning."""
+    if shift.date.weekday() < 5 and shift.shift_type in ("AM", "PM"):
+        return False
+    return not shift.has_auth
 
 
 def _slots_for_ambulance_shift(shift: Shift) -> dict:
@@ -184,7 +191,13 @@ def _build_schedule_sheet(ws, all_shifts):
         current += timedelta(days=7)
 
 
-def _build_summary_sheet(ws, volunteers):
+def _build_summary_sheet(
+    ws,
+    volunteers,
+    ambulance_target_hours: int = 18,
+    campus_emt_max_hours: int = 6,
+    campus_bert_max_hours: int = 9,
+):
     ws.title = "Hour Summary"
     ws.freeze_panes = "A2"
     headers = ["Name", "Email", "Role", "Certification", "Ambulance Hours", "Campus Hours", "Ambulance Status", "Campus Target"]
@@ -193,19 +206,23 @@ def _build_summary_sheet(ws, volunteers):
 
     sorted_people = sorted(volunteers, key=lambda v: (-(getattr(v, "scheduled_hours", 0)), -(getattr(v, "campus_scheduled_hours", 0))))
     for i, v in enumerate(sorted_people, 2):
-        amb_under = getattr(v, "scheduled_hours", 0) < 18
+        amb = getattr(v, "scheduled_hours", 0)
         campus_hours = getattr(v, "campus_scheduled_hours", 0)
-        role = "BERT" if getattr(v, "certification", "") == "BERT" else "AMB"
-        campus_target = 9 if role == "BERT" else 6
+        cert = getattr(v, "certification", "")
+        is_bert = cert == "BERT"
+        role = "BERT" if is_bert else "AMB"
+        amb_under = (not is_bert) and amb < ambulance_target_hours
+        campus_target = campus_bert_max_hours if is_bert else campus_emt_max_hours
+        amb_status = "—" if is_bert else (f"⚠ Under {ambulance_target_hours}h" if amb_under else "OK")
         bg    = C_ALT_ROW if i % 2 == 0 else C_EMT_BG
         vals  = [
             v.full_name,
             v.email,
             role,
-            getattr(v, "certification", ""),
-            getattr(v, "scheduled_hours", 0),
+            cert,
+            amb,
             campus_hours,
-            "⚠ Under 18h" if amb_under else "OK",
+            amb_status,
             f"≤ {campus_target}h (ok if under)",
         ]
         for col, val in enumerate(vals, 1):
@@ -230,10 +247,10 @@ def _build_warnings_sheet(ws, all_shifts):
         shift = all_shifts[key]
         if not shift.volunteers:
             issues.append(("UNFILLED SHIFT", shift.date, shift.shift_type, "No volunteers assigned"))
-        if shift.has_als and not shift.has_evdt:
-            names = ", ".join(v.full_name for v in shift.volunteers) or "—"
-            issues.append(("ALS - NO EVDT", shift.date, shift.shift_type, f"Assigned: {names}"))
-        if not shift.has_auth:
+        if shift.has_als and shift.volunteers and not shift.has_evdt:
+            names = ", ".join(v.full_name for v in shift.volunteers)
+            issues.append(("ALS — NO EVDT", shift.date, shift.shift_type, f"Assigned: {names}"))
+        if _warn_no_auth_driver(shift):
             issues.append(("NO AUTH DRIVER", shift.date, shift.shift_type, "No EVDT or Auth on shift"))
 
     if not issues:
@@ -356,14 +373,29 @@ def _build_campus_sheet(ws, campus_shifts):
         current += timedelta(days=7)
 
 
-def export_schedule_xlsx(all_shifts, volunteers, output_path, violations=None, campus_shifts=None):
+def export_schedule_xlsx(
+    all_shifts,
+    volunteers,
+    output_path,
+    violations=None,
+    campus_shifts=None,
+    ambulance_target_hours: int = 18,
+    campus_emt_max_hours: int = 6,
+    campus_bert_max_hours: int = 9,
+):
     if not output_path.endswith(".xlsx"):
         output_path = output_path.rsplit(".", 1)[0] + ".xlsx"
 
     wb = Workbook()
     _build_schedule_sheet(wb.active, all_shifts)
     _build_campus_sheet(wb.create_sheet(), campus_shifts or {})
-    _build_summary_sheet(wb.create_sheet(), volunteers)
+    _build_summary_sheet(
+        wb.create_sheet(),
+        volunteers,
+        ambulance_target_hours=ambulance_target_hours,
+        campus_emt_max_hours=campus_emt_max_hours,
+        campus_bert_max_hours=campus_bert_max_hours,
+    )
     _build_warnings_sheet(wb.create_sheet(), all_shifts)
     _build_strike_list_sheet(wb.create_sheet(), violations or [])
     wb.save(output_path)
@@ -371,11 +403,15 @@ def export_schedule_xlsx(all_shifts, volunteers, output_path, violations=None, c
     return output_path
 
 
-def print_summary(all_shifts, volunteers):
+def print_summary(all_shifts, volunteers, ambulance_target_hours: int = 18):
     total       = len(all_shifts)
     unfilled    = sum(1 for s in all_shifts.values() if not s.volunteers)
-    als_no_evdt = sum(1 for s in all_shifts.values() if s.has_als and not s.has_evdt)
-    under18     = sum(1 for v in volunteers if v.scheduled_hours < 18)
+    als_no_evdt = sum(
+        1 for s in all_shifts.values()
+        if s.has_als and s.volunteers and not s.has_evdt
+    )
+    no_auth     = sum(1 for s in all_shifts.values() if _warn_no_auth_driver(s))
+    under_tgt   = sum(1 for v in volunteers if v.scheduled_hours < ambulance_target_hours)
 
     print("\n" + "=" * 55)
     print("SCHEDULE SUMMARY")
@@ -383,7 +419,11 @@ def print_summary(all_shifts, volunteers):
     print(f"  Total shifts:          {total}")
     print(f"  Unfilled shifts:       {unfilled}" + (" ⚠" if unfilled else " ✓"))
     print(f"  ALS shifts w/o EVDT:   {als_no_evdt}" + (" ⚠" if als_no_evdt else " ✓"))
-    print(f"  Volunteers under 18h:  {under18}" + (" ⚠" if under18 else " ✓"))
+    print(f"  Night/wknd w/o auth:   {no_auth}" + (" ⚠" if no_auth else " ✓"))
+    print(
+        f"  Volunteers under {ambulance_target_hours}h ambulance:  {under_tgt}"
+        + (" ⚠" if under_tgt else " ✓")
+    )
     print()
 
 
@@ -393,9 +433,9 @@ def print_warnings(all_shifts):
         shift = all_shifts[key]
         if not shift.volunteers:
             issues.append(f"UNFILLED:       {shift.label}")
-        if shift.has_als and not shift.has_evdt:
+        if shift.has_als and shift.volunteers and not shift.has_evdt:
             issues.append(f"ALS / NO EVDT:  {shift.label}")
-        if not shift.has_auth:
+        if _warn_no_auth_driver(shift):
             issues.append(f"NO AUTH DRIVER: {shift.label}")
 
     print("=" * 55)
