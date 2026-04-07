@@ -79,15 +79,15 @@ def _warn_no_auth_driver(shift: Shift) -> bool:
 
 def _slots_for_ambulance_shift(shift: Shift) -> dict:
     """
-    Return slot -> volunteer (or None):
-      - evdt:  first EVDT
-      - auth:  first Auth (not EVDT). EVDT does not "count" as the auth slot here.
+    Return role buckets:
+      - evdts: list of all EVDTs
+      - auths: list of Auth-only drivers (not EVDT)
       - emts:  list of EMT-only (not Auth-capable)
     """
-    evdt = next((v for v in shift.volunteers if v.is_evdt), None)
-    auth = next((v for v in shift.volunteers if v.certification == "Auth"), None)
+    evdts = [v for v in shift.volunteers if v.is_evdt]
+    auths = [v for v in shift.volunteers if v.certification == "Auth"]
     emts = [v for v in shift.volunteers if not v.is_auth]
-    return {"evdt": evdt, "auth": auth, "emts": emts}
+    return {"evdts": evdts, "auths": auths, "emts": emts}
 
 
 def _build_schedule_sheet(ws, all_shifts):
@@ -147,15 +147,15 @@ def _build_schedule_sheet(ws, all_shifts):
                     if shift:
                         slots = _slots_for_ambulance_shift(shift)
                         if slot_key == "evdt":
-                            v = slots["evdt"]
-                            if v:
-                                val = v.full_name
-                                fill = _fill(CERT_BG.get(v.certification, C_EMT_BG))
+                            evdts = slots["evdts"]
+                            if evdts:
+                                val = "\n".join(v.full_name for v in evdts)
+                                fill = _fill(C_EVDT_BG)
                         elif slot_key == "auth":
-                            v = slots["auth"]
-                            if v:
-                                val = v.full_name
-                                fill = _fill(CERT_BG.get(v.certification, C_EMT_BG))
+                            auths = slots["auths"]
+                            if auths:
+                                val = "\n".join(v.full_name for v in auths)
+                                fill = _fill(C_AUTH_BG)
                         else:
                             emts = slots["emts"]
                             idx = 0 if slot_key == "emt1" else 1
@@ -191,6 +191,17 @@ def _build_schedule_sheet(ws, all_shifts):
         current += timedelta(days=7)
 
 
+def _format_ambulance_shift_list(v) -> str:
+    """Human-readable list of ambulance assignments for hour-summary audit."""
+    keys = getattr(v, "scheduled_shifts", None) or []
+    if not keys:
+        return ""
+    lines = []
+    for d, s in sorted(keys, key=lambda k: (k[0], k[1])):
+        lines.append(f"{d.month}/{d.day} {s}")
+    return "; ".join(lines)
+
+
 def _build_summary_sheet(
     ws,
     volunteers,
@@ -200,8 +211,18 @@ def _build_summary_sheet(
 ):
     ws.title = "Hour Summary"
     ws.freeze_panes = "A2"
-    headers = ["Name", "Email", "Role", "Certification", "Ambulance Hours", "Campus Hours", "Ambulance Status", "Campus Target"]
-    widths  = [28, 32, 10, 14, 16, 14, 18, 18]
+    headers = [
+        "Name",
+        "Email",
+        "Role",
+        "Certification",
+        "Ambulance Hours",
+        "Ambulance shifts",
+        "Campus Hours",
+        "Ambulance Status",
+        "Campus Target",
+    ]
+    widths = [28, 32, 10, 14, 12, 40, 14, 18, 18]
     _header_row(ws, 1, headers, widths)
 
     sorted_people = sorted(volunteers, key=lambda v: (-(getattr(v, "scheduled_hours", 0)), -(getattr(v, "campus_scheduled_hours", 0))))
@@ -213,6 +234,7 @@ def _build_summary_sheet(
         role = "BERT" if is_bert else "AMB"
         amb_under = (not is_bert) and amb < ambulance_target_hours
         campus_target = campus_bert_max_hours if is_bert else campus_emt_max_hours
+        amb_detail = "—" if is_bert else _format_ambulance_shift_list(v)
         amb_status = "—" if is_bert else (f"⚠ Under {ambulance_target_hours}h" if amb_under else "OK")
         bg    = C_ALT_ROW if i % 2 == 0 else C_EMT_BG
         vals  = [
@@ -221,6 +243,7 @@ def _build_summary_sheet(
             role,
             cert,
             amb,
+            amb_detail,
             campus_hours,
             amb_status,
             f"≤ {campus_target}h (ok if under)",
@@ -229,10 +252,13 @@ def _build_summary_sheet(
             c = ws.cell(row=i, column=col, value=val)
             c.fill      = _fill(bg)
             c.font      = _font(
-                bold=(col == 7 and amb_under),
-                color=(C_UNDER18 if (col == 7 and amb_under) else "000000")
+                bold=(col == 8 and amb_under),
+                color=(C_UNDER18 if (col == 8 and amb_under) else "000000")
             )
-            c.alignment = _align(h="center" if col in (3,4,5,6,7) else "left")
+            c.alignment = _align(
+                h="center" if col in (3, 4, 5, 7, 8, 9) else "left",
+                wrap=(col == 6),
+            )
             c.border    = BORDER
 
 

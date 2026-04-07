@@ -396,4 +396,24 @@ def run_schedule(
 
     total = n1 + n_cover + n3 + n4
     print(f"  Total: {total} assignments.")
+    reconcile_ambulance_hours(volunteers, all_shifts)
     return all_shifts
+
+
+def reconcile_ambulance_hours(volunteers: list, all_shifts: dict) -> None:
+    """
+    Set each volunteer's scheduled_hours from scheduled_shifts (deduped by shift key).
+    Keeps totals consistent with assignments and makes hour bugs obvious in exports.
+    """
+    for v in volunteers:
+        seen = set()
+        total = 0
+        for key in v.scheduled_shifts:
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in all_shifts:
+                total += all_shifts[key].hours
+            else:
+                total += SHIFT_HOURS.get(key[1], 0)
+        v.scheduled_hours = total
