@@ -201,6 +201,15 @@ def _format_ambulance_shift_list(v) -> str:
         lines.append(f"{d.month}/{d.day} {s}")
     return "; ".join(lines)
 
+def _format_campus_shift_list(v) -> str:
+    keys = getattr(v, "campus_scheduled_shifts", None) or []
+    if not keys:
+        return ""
+    lines = []
+    for d, b in sorted(keys, key=lambda k: (k[0], k[1])):
+        lines.append(f"{d.month}/{d.day} {b}")
+    return "; ".join(lines)
+
 
 def _build_summary_sheet(
     ws,
@@ -219,10 +228,11 @@ def _build_summary_sheet(
         "Ambulance Hours",
         "Ambulance shifts",
         "Campus Hours",
+        "Campus shifts",
         "Ambulance Status",
         "Campus Target",
     ]
-    widths = [28, 32, 10, 14, 12, 40, 14, 18, 18]
+    widths = [28, 32, 10, 14, 12, 40, 12, 32, 18, 18]
     _header_row(ws, 1, headers, widths)
 
     sorted_people = sorted(volunteers, key=lambda v: (-(getattr(v, "scheduled_hours", 0)), -(getattr(v, "campus_scheduled_hours", 0))))
@@ -235,6 +245,7 @@ def _build_summary_sheet(
         amb_under = (not is_bert) and amb < ambulance_target_hours
         campus_target = campus_bert_max_hours if is_bert else campus_emt_max_hours
         amb_detail = "—" if is_bert else _format_ambulance_shift_list(v)
+        campus_detail = _format_campus_shift_list(v)
         amb_status = "—" if is_bert else (f"⚠ Under {ambulance_target_hours}h" if amb_under else "OK")
         bg    = C_ALT_ROW if i % 2 == 0 else C_EMT_BG
         vals  = [
@@ -245,6 +256,7 @@ def _build_summary_sheet(
             amb,
             amb_detail,
             campus_hours,
+            campus_detail,
             amb_status,
             f"≤ {campus_target}h (ok if under)",
         ]
@@ -252,12 +264,12 @@ def _build_summary_sheet(
             c = ws.cell(row=i, column=col, value=val)
             c.fill      = _fill(bg)
             c.font      = _font(
-                bold=(col == 8 and amb_under),
-                color=(C_UNDER18 if (col == 8 and amb_under) else "000000")
+                bold=(col == 9 and amb_under),
+                color=(C_UNDER18 if (col == 9 and amb_under) else "000000")
             )
             c.alignment = _align(
-                h="center" if col in (3, 4, 5, 7, 8, 9) else "left",
-                wrap=(col == 6),
+                h="center" if col in (3, 4, 5, 7, 9, 10) else "left",
+                wrap=(col in (6, 8)),
             )
             c.border    = BORDER
 

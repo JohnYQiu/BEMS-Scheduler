@@ -14,7 +14,8 @@ from typing import Optional, Tuple, Dict, List, Set, Any
 
 
 COL_ROLE = "Are you an ambulance EMT or BERT member?"
-COL_EMAIL = "Username"
+COL_EMAIL = "Email Address"
+COL_EMAIL_FALLBACK = "Username"
 COL_TIMESTAMP = "Timestamp"
 COL_DRIVER = "Driver Status"
 
@@ -78,15 +79,7 @@ def normalise_driver(raw: str) -> str:
     return "EMT"
 
 
-_DATE_IN_HEADER = re.compile(
-    r"Please indicate your availability for the below dates and shifts\.\s*\[(\d{1,2})/(\d{1,2})"
-)
-_SAT_HEADER = re.compile(
-    r"Please indicate your availability for Saturdays during this block\.\s*\[(\d{1,2})/(\d{1,2})\]"
-)
-_SUN_HEADER = re.compile(
-    r"Please indicate your availability for Sundays during this block\.\s*\[(\d{1,2})/(\d{1,2})\]"
-)
+_BRACKET_DATE = re.compile(r"\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*(\d{1,2})/(\d{1,2})", re.IGNORECASE)
 
 
 def _parse_timestamp(ts_str: str) -> datetime:
@@ -138,55 +131,55 @@ def _parse_blocks_from_cell(cell: str) -> list[str]:
 
 
 def _build_column_maps(headers: List[str], block_start: date, block_end: date) -> Dict[str, Any]:
-    """Return dicts: emt_col -> (date, shift_types), sat/sun column lists."""
-    emt_weekday: Dict[int, Tuple[date, Tuple[str, ...]]] = {}
-    emt_sat: list[tuple[int, date]] = []
-    emt_sun: list[tuple[int, date]] = []
+    """
+    Return column maps for the current form style.
 
-    bert_weekday: dict[int, tuple[date, tuple[str, ...]]] = {}
+    Ambulance EMT section typically includes:
+      - Day Shifts ... [Mon 4/27]  (cells contain AM/PM)
+      - Night Shifts [Mon 4/27]    (cells contain NIGHT)
+      - Weekend Day [Sat 5/2]      (cells contain DAY)
+
+    BERT section includes:
+      - Please indicate your availability ... [Mon 4/27] (cells contain A/B/C/D)
+    """
+    emt_day_cols: Dict[int, date] = {}
+    emt_night_cols: Dict[int, date] = {}
+    emt_weekend_day_cols: Dict[int, date] = {}
+
+    bert_cols: Dict[int, date] = {}
 
     for i, h in enumerate(headers):
-        if (m := _DATE_IN_HEADER.search(h or "")):
-            mo, dy = int(m.group(1)), int(m.group(2))
-            d = _header_date_to_date(mo, dy, block_start, block_end)
-            if d is None:
-                continue
-            if d.weekday() < 5:
-                emt_weekday[i] = (d, ("AM", "PM", "NIGHT"))
-            else:
-                emt_weekday[i] = (d, ("DAY", "NIGHT"))
-        elif (m := _SAT_HEADER.search(h or "")):
-            mo, dy = int(m.group(1)), int(m.group(2))
-            d = _header_date_to_date(mo, dy, block_start, block_end)
-            if d is not None:
-                emt_sat.append((i, d))
-        elif (m := _SUN_HEADER.search(h or "")):
-            mo, dy = int(m.group(1)), int(m.group(2))
-            d = _header_date_to_date(mo, dy, block_start, block_end)
-            if d is not None:
-                emt_sun.append((i, d))
+        hh = (h or "").strip()
+        m = _BRACKET_DATE.search(hh)
+        if not m:
+            continue
+        mo, dy = int(m.group(1)), int(m.group(2))
+        d = _header_date_to_date(mo, dy, block_start, block_end)
+        if d is None:
+            continue
+
+        low = hh.lower()
+        if low.startswith("day shifts"):
+            emt_day_cols[i] = d
+        elif low.startswith("night shifts"):
+            emt_night_cols[i] = d
+        elif low.startswith("weekend day"):
+            emt_weekend_day_cols[i] = d
+        elif "select minimum of 1 a/b" in low or ("a/b" in low and "c/d" in low and "availability" in low):
+            bert_cols[i] = d
 
     idx_role = next((i for i, h in enumerate(headers) if h and COL_ROLE in h), -1)
     idx_driver = next((i for i, h in enumerate(headers) if h and COL_DRIVER in h), -1)
     idx_bert_last = _find_nth_header(headers, "Last Name", 1)
 
-    for i, h in enumerate(headers):
-        if i <= idx_bert_last or idx_bert_last < 0:
-            continue
-        if (m := _DATE_IN_HEADER.search(h or "")):
-            mo, dy = int(m.group(1)), int(m.group(2))
-            d = _header_date_to_date(mo, dy, block_start, block_end)
-            if d is None or d.weekday() >= 5:
-                continue
-            bert_weekday[i] = (d, ("A", "B", "C", "D"))
-
     return {
-        "emt_weekday": emt_weekday,
-        "emt_sat": emt_sat,
-        "emt_sun": emt_sun,
-        "bert_weekday": bert_weekday,
+        "emt_day_cols": emt_day_cols,
+        "emt_night_cols": emt_night_cols,
+        "emt_weekend_day_cols": emt_weekend_day_cols,
+        "bert_cols": bert_cols,
         "idx_role": idx_role,
-        "idx_email": next((i for i, h in enumerate(headers) if h and COL_EMAIL in h), 1),
+        "idx_email": next((i for i, h in enumerate(headers) if h and h.strip() == COL_EMAIL), -1),
+        "idx_email_fallback": next((i for i, h in enumerate(headers) if h and h.strip() == COL_EMAIL_FALLBACK), -1),
         "idx_ts": next((i for i, h in enumerate(headers) if h and COL_TIMESTAMP in h), 0),
         "idx_driver": idx_driver,
         "idx_emt_first": next((i for i, h in enumerate(headers) if h and h.strip() == "First Name"), -1),
@@ -223,30 +216,31 @@ def _expand_emt_row(
     block_end: date,
 ) -> set:
     available: set = set()
-    for col_idx, (d, _allowed) in maps["emt_weekday"].items():
+    # Day shift columns: cells contain AM and/or PM
+    for col_idx, d in maps.get("emt_day_cols", {}).items():
         cell = _safe(row, col_idx)
         for s in _parse_shifts_from_cell(cell):
-            if (d, s) not in available:
+            if s in ("AM", "PM"):
                 available.add((d, s))
 
-    for col_idx, d in maps["emt_sat"]:
+    # Night shift columns: cells contain NIGHT
+    for col_idx, d in maps.get("emt_night_cols", {}).items():
         cell = _safe(row, col_idx)
-        for s in _parse_shifts_from_cell(cell):
-            if d.weekday() == 5 and s in ("DAY", "NIGHT"):
-                available.add((d, s))
+        if "NIGHT" in (cell or "").upper():
+            available.add((d, "NIGHT"))
 
-    for col_idx, d in maps["emt_sun"]:
+    # Weekend day columns: cells contain DAY (0700–1900)
+    for col_idx, d in maps.get("emt_weekend_day_cols", {}).items():
         cell = _safe(row, col_idx)
-        for s in _parse_shifts_from_cell(cell):
-            if d.weekday() == 6 and s in ("DAY", "NIGHT"):
-                available.add((d, s))
+        if "DAY" in (cell or "").upper():
+            available.add((d, "DAY"))
 
     return available
 
 
 def _expand_bert_row(row: list[str], maps: dict, block_start: date, block_end: date) -> set:
     result = set()
-    for col_idx, (d, _blocks) in maps["bert_weekday"].items():
+    for col_idx, d in maps.get("bert_cols", {}).items():
         cell = _safe(row, col_idx)
         for b in _parse_blocks_from_cell(cell):
             result.add((d, b))
@@ -392,7 +386,9 @@ def load_all_responses(
     latest_bert: dict[str, tuple] = {}
 
     idx_role = maps["idx_role"]
-    idx_email = maps["idx_email"]
+    idx_email = maps.get("idx_email", -1)
+    if idx_email is None or idx_email < 0:
+        idx_email = maps.get("idx_email_fallback", -1)
     idx_ts = maps["idx_ts"]
 
     for row in data_rows:

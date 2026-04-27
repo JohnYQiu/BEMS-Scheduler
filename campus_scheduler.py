@@ -123,34 +123,42 @@ def run_campus_schedule(
         # - prioritize less flexible people (smaller flex)
         return remaining * 1000 - flex.get(person.email, 999)
 
-    # Build heap of all possible assignments; rebuild after each assignment.
-    def rebuild():
-        heap = []
-        for key, shift in shifts.items():
-            if len(shift.responders) >= responders_per_block:
-                continue
-            for i, person in enumerate(people):
-                if _eligible(person, key, shift, caps):
-                    heapq.heappush(heap, (-score(person, shift), i, key))
-        return heap
+    def _fill_to_target(target_per_block: int) -> int:
+        # Build heap of all possible assignments; rebuild after each assignment.
+        def rebuild():
+            heap = []
+            for key, shift in shifts.items():
+                if len(shift.responders) >= target_per_block:
+                    continue
+                for i, person in enumerate(people):
+                    if _eligible(person, key, shift, caps):
+                        heapq.heappush(heap, (-score(person, shift), i, key))
+            return heap
 
-    heap = rebuild()
-    count = 0
-    while heap:
-        neg_s, p_idx, key = heapq.heappop(heap)
-        shift = shifts[key]
-        person = people[p_idx]
-
-        if len(shift.responders) >= responders_per_block:
-            continue
-        if not _eligible(person, key, shift, caps):
-            continue
-
-        shift.responders.append(person)
-        person.campus_scheduled_hours = _campus_hours(person) + CAMPUS_BLOCK_HOURS
-        person.campus_scheduled_shifts.append(key)
-        count += 1
         heap = rebuild()
+        count = 0
+        while heap:
+            neg_s, p_idx, key = heapq.heappop(heap)
+            shift = shifts[key]
+            person = people[p_idx]
+
+            if len(shift.responders) >= target_per_block:
+                continue
+            if not _eligible(person, key, shift, caps):
+                continue
+
+            shift.responders.append(person)
+            person.campus_scheduled_hours = _campus_hours(person) + CAMPUS_BLOCK_HOURS
+            person.campus_scheduled_shifts.append(key)
+            count += 1
+            heap = rebuild()
+        return count
+
+    # Ensure every block has 1 responder before doubling up.
+    if responders_per_block >= 1:
+        _fill_to_target(1)
+    if responders_per_block >= 2:
+        _fill_to_target(responders_per_block)
 
     return shifts
 

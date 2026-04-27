@@ -1,14 +1,14 @@
 {
-  "block_start": "2026-04-08",
-  "block_end": "2026-04-26",
+  "block_start": "2026-04-27",
+  "block_end": "2026-05-14",
   "form_csv": "form_responses.csv",
   "output_csv": "schedule_output.csv",
   "blackout_periods": [],
   "hour_limits": {
     "ambulance": {
-      "target_hours": 18,
-      "soft_max_hours": 18,
-      "hard_max_hours": 18
+      "target_hours": 12,
+      "soft_max_hours": 12,
+      "hard_max_hours": 12
     },
     "campus": {
       "ambulance_emt_max_hours": 3,
@@ -16,20 +16,21 @@
     }
   },
   "als_shifts": [
-  "2026-04-14:NIGHT",
-  "2026-04-16:DAY",
-  "2026-04-16:NIGHT",
-  "2026-04-18:DAY",
-  "2026-04-18:NIGHT",
-  "2026-04-19:DAY",
-  "2026-04-19:NIGHT",
-  "2026-04-20:DAY",
-  "2026-04-20:NIGHT",
-  "2026-04-21:NIGHT",
-  "2026-04-23:DAY",
-  "2026-04-23:NIGHT",
-  "2026-04-25:DAY",
-  "2026-04-26:DAY",
-  "2026-04-26:NIGHT"
+  "2026-04-27:DAY",
+  "2026-04-27:NIGHT",
+  "2026-04-28:NIGHT",
+  "2026-04-29:NIGHT",
+  "2026-04-30:DAY",
+  "2026-05-02:DAY",
+  "2026-05-04:DAY",
+  "2026-05-04:NIGHT",
+  "2026-05-05:NIGHT",
+  "2026-05-06:NIGHT",
+  "2026-05-07:DAY",
+  "2026-05-11:DAY",
+  "2026-05-11:NIGHT",
+  "2026-05-12:NIGHT",
+  "2026-05-14:DAY",
+  "2026-05-14:NIGHT"
 ]
 }
