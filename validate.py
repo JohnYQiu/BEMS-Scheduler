@@ -1,94 +1,116 @@
 """
 validate.py
 ===========
-Pre-scheduling validation. Checks that each Ambulance EMT volunteer submitted
-at least one availability slot for each required shift type:
-  - At least 1 Weekday AM
-  - At least 1 Weekday PM
-  - At least 1 Weekday NIGHT
-  - At least 1 Weekend DAY
-  - At least 1 Weekend NIGHT
+Pre-scheduling checks. Thresholds are config-driven ("availability_requirements"
+in config.json) so the code always matches what the current form asked for.
 
-Prints a strike list of volunteers who did not meet requirements,
-including exactly what they are missing.
-Also prints a per-shift availability summary so personnel can spot thin days.
+  - Ambulance EMTs: minimum number of weekday day shifts / nights / weekend
+    shifts selected, plus enough total available hours to reach the block
+    requirement.
+  - BERT members: minimum A/B and C/D block selections.
+  - Per-slot availability summary so personnel can spot thin days up front.
 """
 
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
-from parse_form import Volunteer, SHIFT_HOURS
+
+from models import SHIFT_HOURS, BertMember, Volunteer, is_weekend, shift_types_for
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+@dataclass
+class AvailabilityRequirements:
+    emt_min_day_shifts: int = 2      # weekday AM/PM selections
+    emt_min_night_shifts: int = 1    # NIGHT selections (any day)
+    emt_min_weekend_shifts: int = 1  # weekend DAY or NIGHT selections
+    bert_min_ab_blocks: int = 1      # A or B selections
+    bert_min_cd_blocks: int = 1      # C or D selections
 
-def _is_weekday(d: date) -> bool:
-    return d.weekday() < 5  # Mon–Fri
+    @classmethod
+    def from_config(cls, cfg: dict) -> "AvailabilityRequirements":
+        raw = cfg.get("availability_requirements") or {}
+        emt = raw.get("ambulance") or {}
+        bert = raw.get("bert") or {}
+        return cls(
+            emt_min_day_shifts=int(emt.get("min_day_shifts", 2)),
+            emt_min_night_shifts=int(emt.get("min_night_shifts", 1)),
+            emt_min_weekend_shifts=int(emt.get("min_weekend_shifts", 1)),
+            bert_min_ab_blocks=int(bert.get("min_ab_blocks", 1)),
+            bert_min_cd_blocks=int(bert.get("min_cd_blocks", 1)),
+        )
 
-def _is_weekend(d: date) -> bool:
-    return d.weekday() >= 5  # Sat–Sun
 
-
-# ── Availability requirement check ───────────────────────────────────────────
-
-REQUIRED_CATEGORIES = [
-    ("WEEKDAY AM",    lambda d, s: _is_weekday(d) and s == "AM"),
-    ("WEEKDAY PM",    lambda d, s: _is_weekday(d) and s == "PM"),
-    ("WEEKDAY NIGHT", lambda d, s: _is_weekday(d) and s == "NIGHT"),
-    ("WEEKEND DAY",   lambda d, s: _is_weekend(d) and s == "DAY"),
-    ("WEEKEND NIGHT", lambda d, s: _is_weekend(d) and s == "NIGHT"),
-]
-
-def check_availability_requirements(volunteers: list[Volunteer]) -> list[dict]:
-    """
-    Returns a list of dicts for volunteers who are missing required categories:
-      {"volunteer": v, "missing": ["WEEKDAY AM", "WEEKEND NIGHT", ...]}
-    """
+def check_ambulance_requirements(
+    volunteers: list[Volunteer], reqs: AvailabilityRequirements
+) -> list[dict]:
+    """Volunteers whose submitted availability falls short of the form's minimums."""
     violations = []
     for v in volunteers:
+        day = sum(1 for (d, s) in v.available if s in ("AM", "PM"))
+        night = sum(1 for (d, s) in v.available if s == "NIGHT")
+        weekend = sum(1 for (d, s) in v.available if is_weekend(d))
         missing = []
-        for label, test in REQUIRED_CATEGORIES:
-            has = any(test(d, s) for (d, s) in v.available)
-            if not has:
-                missing.append(label)
+        if day < reqs.emt_min_day_shifts:
+            missing.append(f"weekday day shifts ({day}/{reqs.emt_min_day_shifts})")
+        if night < reqs.emt_min_night_shifts:
+            missing.append(f"night shifts ({night}/{reqs.emt_min_night_shifts})")
+        if weekend < reqs.emt_min_weekend_shifts:
+            missing.append(f"weekend shifts ({weekend}/{reqs.emt_min_weekend_shifts})")
         if missing:
             violations.append({"volunteer": v, "missing": missing})
     return violations
 
 
-def print_strike_list(violations: list[dict]):
-    print("\n" + "=" * 60)
-    print("STRIKE LIST — INSUFFICIENT AVAILABILITY SUBMITTED")
-    print("=" * 60)
-    if not violations:
-        print("  ✓ All volunteers met the minimum availability requirements.")
-        return
-    print(f"  {len(violations)} volunteer(s) did not meet requirements:\n")
-    for item in violations:
-        v = item["volunteer"]
-        missing_str = ", ".join(item["missing"])
-        print(f"  • {v.full_name:<28} Missing: {missing_str}")
-    print()
+def check_bert_requirements(
+    bert_members: list[BertMember], reqs: AvailabilityRequirements
+) -> list[dict]:
+    violations = []
+    for b in bert_members:
+        ab = sum(1 for (_, blk) in b.campus_available if blk in ("A", "B"))
+        cd = sum(1 for (_, blk) in b.campus_available if blk in ("C", "D"))
+        missing = []
+        if ab < reqs.bert_min_ab_blocks:
+            missing.append(f"A/B blocks ({ab}/{reqs.bert_min_ab_blocks})")
+        if cd < reqs.bert_min_cd_blocks:
+            missing.append(f"C/D blocks ({cd}/{reqs.bert_min_cd_blocks})")
+        if missing:
+            violations.append({"volunteer": b, "missing": missing})
+    return violations
 
 
-# ── Total hours check ─────────────────────────────────────────────────────────
-
-def check_total_available_hours(volunteers: list[Volunteer], min_hours: int = 18) -> list[dict]:
-    """
-    Flag volunteers whose total submitted availability is less than min_hours.
-    This is a secondary check — the primary is the category check above.
-    """
+def check_total_available_hours(volunteers: list[Volunteer], min_hours: int) -> list[dict]:
+    """EMTs who cannot possibly reach the hour requirement with what they submitted."""
     warnings = []
     for v in volunteers:
-        total = sum(SHIFT_HOURS.get(s, 0) for (_, s) in v.available)
+        total = sum(SHIFT_HOURS[s] for (_, s) in v.available)
         if total < min_hours:
             warnings.append({"volunteer": v, "total_hours": total})
     return warnings
 
 
-def print_hours_warnings(warnings: list[dict], min_hours: int = 18):
+# ── Printing ─────────────────────────────────────────────────────────────────
+
+def print_strike_list(violations: list[dict], title: str) -> None:
+    print("\n" + "=" * 60)
+    print(f"STRIKE LIST — {title}")
+    print("=" * 60)
+    if not violations:
+        print("  ✓ Everyone met the minimum availability requirements.")
+        return
+    print(f"  {len(violations)} member(s) short of requirements:\n")
+    for item in violations:
+        v = item["volunteer"]
+        print(f"  • {v.full_name:<28} Missing: {', '.join(item['missing'])}")
+    print()
+
+
+def print_hours_warnings(warnings: list[dict], min_hours: int) -> None:
     if not warnings:
         return
     print("\n" + "=" * 60)
-    print(f"LOW AVAILABILITY WARNING — TOTAL HOURS < {min_hours}")
+    print(f"LOW AVAILABILITY — TOTAL SUBMITTED HOURS < {min_hours}")
     print("=" * 60)
     for item in warnings:
         v = item["volunteer"]
@@ -96,44 +118,29 @@ def print_hours_warnings(warnings: list[dict], min_hours: int = 18):
     print()
 
 
-# ── Per-shift availability summary ───────────────────────────────────────────
-
 def print_availability_summary(
     volunteers: list[Volunteer],
     schedule_dates: list[date],
-    blackout_slots: set = None,
-):
-    """
-    Print how many volunteers are available for each shift slot,
-    so personnel can identify thin coverage days before scheduling.
-    """
-    from collections import defaultdict
+    blackout_slots: set | None = None,
+) -> None:
+    blackout_slots = blackout_slots or set()
     counts: dict = defaultdict(int)
     evdt_counts: dict = defaultdict(int)
-
-    blackout_slots = blackout_slots or set()
-
     for v in volunteers:
-        for (d, s) in v.available:
-            if (d, s) in blackout_slots:
+        for key in v.available:
+            if key in blackout_slots:
                 continue
-            counts[(d, s)] += 1
+            counts[key] += 1
             if v.is_evdt:
-                evdt_counts[(d, s)] += 1
-
-    def shifts_for(d: date):
-        if d.weekday() >= 5:
-            return ["DAY", "NIGHT"]
-        return ["AM", "PM", "NIGHT"]
+                evdt_counts[key] += 1
 
     print("\n" + "=" * 60)
     print("AVAILABILITY SUMMARY (volunteers available per slot)")
     print("=" * 60)
     for d in schedule_dates:
-        dow = d.strftime("%a")
-        for s in shifts_for(d):
+        for s in shift_types_for(d):
             n = counts.get((d, s), 0)
             e = evdt_counts.get((d, s), 0)
             flag = " ⚠ LOW" if n < 2 else ""
-            print(f"  {d.isoformat()} ({dow}) {s:<6}  {n:>2} available  ({e} EVDT){flag}")
+            print(f"  {d.isoformat()} ({d.strftime('%a')}) {s:<6}  {n:>2} available  ({e} EVDT){flag}")
     print()
