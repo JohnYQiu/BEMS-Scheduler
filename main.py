@@ -27,7 +27,13 @@ from pathlib import Path
 from ambulance_solver import solve_ambulance
 from campus_solver import solve_campus
 from models import block_dates, expand_als_entries, expand_blackout_period
-from output import export_schedule_xlsx, print_summary, print_warnings, collect_warnings
+from output import (
+    collect_warnings,
+    export_master_schedule_csv,
+    export_schedule_xlsx,
+    print_summary,
+    print_warnings,
+)
 from parse_form import load_all_responses
 from validate import (
     AvailabilityRequirements,
@@ -130,7 +136,11 @@ def main() -> None:
         assignments, campus_assignments, volunteers, bert_members, als_shifts,
         ambulance_required, campus_emt_required, campus_bert_required, responders_per_block,
     )
-    print_warnings(collect_warnings(assignments, als_shifts, volunteers, ambulance_required))
+    warnings = collect_warnings(
+        assignments, als_shifts, volunteers, ambulance_required,
+        campus_assignments, responders_per_block,
+    )
+    print_warnings(warnings)
     print("▶  Exporting...")
     export_schedule_xlsx(
         assignments, campus_assignments, volunteers + bert_members,
@@ -142,6 +152,17 @@ def main() -> None:
         campus_bert_required=campus_bert_required,
         responders_per_block=responders_per_block,
     )
+    master_export = cfg.get("master_schedule_export", {})
+    if master_export.get("enabled", True):
+        export_master_schedule_csv(
+            assignments,
+            campus_assignments,
+            block_start,
+            output_path=master_export.get("path", "master_schedule.csv"),
+            block=master_export.get("block", "F26B1"),
+            daynum_start=int(master_export.get("daynum_start", 810)),
+            vehicle=master_export.get("vehicle", "R1"),
+        )
     print("✓  Done.\n")
 
 
