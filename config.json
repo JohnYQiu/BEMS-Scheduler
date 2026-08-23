@@ -1,8 +1,15 @@
 {
-  "block_start": "2026-04-27",
-  "block_end": "2026-05-14",
+  "block_start": "2026-08-10",
+  "block_end": "2026-09-03",
   "form_csv": "form_responses.csv",
   "output_xlsx": "schedule_output.xlsx",
+  "master_schedule_export": {
+    "enabled": true,
+    "path": "master_schedule.csv",
+    "block": "F26B1",
+    "daynum_start": 810,
+    "vehicle": "R1"
+  },
   "blackout_periods": [],
 
   "hours": {
@@ -26,22 +33,5 @@
     }
   },
 
-  "als_shifts": [
-    "2026-04-27:DAY",
-    "2026-04-27:NIGHT",
-    "2026-04-28:NIGHT",
-    "2026-04-29:NIGHT",
-    "2026-04-30:DAY",
-    "2026-05-02:DAY",
-    "2026-05-04:DAY",
-    "2026-05-04:NIGHT",
-    "2026-05-05:NIGHT",
-    "2026-05-06:NIGHT",
-    "2026-05-07:DAY",
-    "2026-05-11:DAY",
-    "2026-05-11:NIGHT",
-    "2026-05-12:NIGHT",
-    "2026-05-14:DAY",
-    "2026-05-14:NIGHT"
-  ]
+  "als_shifts": []
 }
