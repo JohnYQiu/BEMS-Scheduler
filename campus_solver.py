@@ -13,6 +13,9 @@ Hard constraints
   - At most `responders_per_block` people per block.
   - Nobody exceeds their campus hour requirement.
   - Ambulance EMTs never overlap their assigned ambulance shifts.
+  - A staffed campus block always has a driver-eligible responder (EVDT or
+    Authorized).  A block without one stays open rather than placing an EMT
+    or BERT member in the S1 driver seat.
 
 Objective (highest priority first)
 ----------------------------------
@@ -88,6 +91,21 @@ def solve_campus(
 
         covered = model.new_bool_var(f"cov_{key[0]}_{key[1]}")
         model.add(sum(assigned) >= 1).only_enforce_if(covered)
+        # "covered" means genuinely coverable: an uncovered block must not
+        # receive a non-driver merely to improve that person's hour total.
+        model.add(sum(assigned) == 0).only_enforce_if(covered.negated())
+
+        driver_vars = [
+            y[(pi, key)]
+            for pi, p in enumerate(people)
+            if (pi, key) in y and getattr(p, "is_driver", False)
+        ]
+        if driver_vars:
+            model.add(sum(driver_vars) >= 1).only_enforce_if(covered)
+        else:
+            # No person who could occupy S1 is available, so preserve the
+            # open block for a manual dispatcher decision.
+            model.add(covered == 0)
         terms.append(W_COVER * covered)
 
         # Reward each responder beyond the first, up to the target.
