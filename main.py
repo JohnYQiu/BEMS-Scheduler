@@ -82,6 +82,7 @@ def main() -> None:
     campus_emt_required = int(hours.get("campus_emt", 3))
     campus_bert_required = int(hours.get("campus_bert", 6))
     responders_per_block = int(cfg.get("campus_responders_per_block", 2))
+    require_campus_driver = cfg.get("campus_driver_policy", "prefer") == "require"
     time_limit_s = float(cfg.get("solver_time_limit_s", 30))
     reqs = AvailabilityRequirements.from_config(cfg)
 
@@ -128,6 +129,7 @@ def main() -> None:
         responders_per_block=responders_per_block,
         emt_required_hours=campus_emt_required,
         bert_required_hours=campus_bert_required,
+        require_driver=require_campus_driver,
         time_limit_s=time_limit_s,
     )
 
