@@ -134,6 +134,17 @@ def _find_nth_header(headers: list[str], exact: str, n: int) -> int:
 def _build_column_maps(headers: list[str], block_start: date, block_end: date) -> dict:
     emt_day, emt_night, emt_weekend, emt_week, bert = {}, {}, {}, {}, {}
 
+    def find(exact: str) -> int:
+        return next((i for i, h in enumerate(headers) if (h or "").strip() == exact), -1)
+
+    def find_contains(sub: str, after: int = -1) -> int:
+        return next((i for i, h in enumerate(headers) if i > after and h and sub in h), -1)
+
+    # The Fall 2026 shopping-period form keeps its visible grid titles generic.
+    # Its BERT grids follow the second First Name field, while the EMT grids are
+    # explicitly marked Weekdays / Weekend Days / Weekend Nights.
+    idx_bert_first = _find_nth_header(headers, "First Name", 1)
+
     for i, h in enumerate(headers):
         hh = (h or "").strip()
         m = _BRACKET_DATE.search(hh)
@@ -155,12 +166,16 @@ def _build_column_maps(headers: list[str], block_start: date, block_end: date) -
             emt_week[i] = d
         elif "campus response availability" in low or ("availability" in low and "a/b" in low):
             bert[i] = d
-
-    def find(exact: str) -> int:
-        return next((i for i, h in enumerate(headers) if (h or "").strip() == exact), -1)
-
-    def find_contains(sub: str, after: int = -1) -> int:
-        return next((i for i, h in enumerate(headers) if i > after and h and sub in h), -1)
+        # Shopping-period form: every EMT grid is explicitly labelled with a
+        # weekday/weekend qualifier, including the Sunday weekday-night grids.
+        elif any(label in low for label in (
+            "(weekdays)", "(weekday nights)", "(weekend nights)", "(weekend days)",
+        )):
+            emt_week[i] = d
+        # Its Campus Response grids have the same generic title but appear in
+        # the BERT section and contain A/B/C/D response values.
+        elif idx_bert_first >= 0 and i > idx_bert_first:
+            bert[i] = d
 
     # The EMT and BERT sections each have their own First/Last Name and
     # difficulties question; BERT's are the second occurrence of each.
@@ -178,7 +193,7 @@ def _build_column_maps(headers: list[str], block_start: date, block_end: date) -
         "idx_emt_first": _find_nth_header(headers, "First Name", 0),
         "idx_emt_last": _find_nth_header(headers, "Last Name", 0),
         "idx_emt_diff": idx_emt_diff,
-        "idx_bert_first": _find_nth_header(headers, "First Name", 1),
+        "idx_bert_first": idx_bert_first,
         "idx_bert_last": _find_nth_header(headers, "Last Name", 1),
         "idx_bert_diff": find_contains(COL_DIFFICULTIES, after=idx_emt_diff),
     }
