@@ -8,6 +8,7 @@ from campus_solver import solve_campus
 from models import BertMember, Volunteer
 from output import export_master_schedule_csv
 from parse_form import _build_column_maps
+from validate import AvailabilityRequirements, check_ambulance_requirements
 
 
 class MasterScheduleExportTests(unittest.TestCase):
@@ -65,6 +66,45 @@ class ParserCompatibilityTests(unittest.TestCase):
         self.assertEqual(maps["emt_night"][1], date(2026, 8, 10))
         self.assertEqual(maps["emt_week"][2], date(2026, 8, 11))
         self.assertEqual(maps["bert"][3], date(2026, 8, 11))
+
+    def test_shopping_period_form_headers_are_mapped(self):
+        headers = [
+            "Last Name", "First Name",
+            "Please indicate your availability for the below dates and shifts. (Weekdays) [Tue  9/8]",
+            "Please indicate your availability for the below dates and shifts. (Weekend Nights) [Sat 9/12]",
+            "Last Name", "First Name",
+            "Please indicate your availability for the below dates and shifts. [Tue 9/8]",
+        ]
+        maps = _build_column_maps(headers, date(2026, 9, 8), date(2026, 9, 20))
+        self.assertEqual(maps["emt_week"][2], date(2026, 9, 8))
+        self.assertEqual(maps["emt_week"][3], date(2026, 9, 12))
+        self.assertEqual(maps["bert"][6], date(2026, 9, 8))
+
+
+class ShoppingPeriodValidationTests(unittest.TestCase):
+    def test_strict_form_categories_require_each_kind_of_availability(self):
+        reqs = AvailabilityRequirements(
+            emt_min_weekday_am_shifts=1, emt_min_weekday_pm_shifts=1,
+            emt_min_weekday_night_shifts=1, emt_min_weekend_day_shifts=1,
+            emt_min_weekend_night_shifts=1,
+        )
+        only_am = Volunteer("Test", "EMT", "test@example.com", "EMT", available={
+            (date(2026, 9, 8), "AM"), (date(2026, 9, 9), "AM"),
+        })
+        missing = check_ambulance_requirements([only_am], reqs)[0]["missing"]
+        self.assertIn("weekday PM shifts (0/1)", missing)
+        self.assertIn("weekend night shifts (0/1)", missing)
+
+    def test_friday_night_does_not_count_as_weekday_night(self):
+        reqs = AvailabilityRequirements(
+            emt_min_weekday_night_shifts=1,
+            emt_min_weekend_night_shifts=1,
+        )
+        friday_only = Volunteer("Test", "EMT", "test@example.com", "EMT", available={
+            (date(2026, 9, 11), "NIGHT"),
+        })
+        missing = check_ambulance_requirements([friday_only], reqs)[0]["missing"]
+        self.assertIn("weekday night shifts (0/1)", missing)
 
 
 if __name__ == "__main__":
