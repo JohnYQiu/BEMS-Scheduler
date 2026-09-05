@@ -38,11 +38,17 @@ class MasterScheduleExportTests(unittest.TestCase):
 
 
 class CampusDriverConstraintTests(unittest.TestCase):
-    def test_block_with_no_driver_eligible_person_stays_open(self):
+    def test_block_with_no_driver_eligible_person_is_still_covered(self):
         d = date(2026, 8, 10)
         emt = Volunteer("EMT", "Only", "emt@example.com", "EMT", campus_available={(d, "A")})
         bert = BertMember("BERT", "Only", "bert@example.com", campus_available={(d, "A")})
         assignments = solve_campus([emt], [bert], [d], time_limit_s=5)
+        self.assertEqual(len(assignments[(d, "A")]), 2)
+
+    def test_driver_can_still_be_required_when_requested(self):
+        d = date(2026, 8, 10)
+        emt = Volunteer("EMT", "Only", "emt@example.com", "EMT", campus_available={(d, "A")})
+        assignments = solve_campus([emt], [], [d], require_driver=True, time_limit_s=5)
         self.assertEqual(assignments[(d, "A")], [])
 
     def test_driver_eligible_person_is_first_in_campus_assignment(self):
