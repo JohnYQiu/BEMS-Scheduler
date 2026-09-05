@@ -42,7 +42,8 @@ def main() -> None:
     campus = solve_campus(volunteers, bert_members, schedule_dates,
                           responders_per_block=int(cfg.get("campus_responders_per_block", 2)),
                           emt_required_hours=int(hours.get("campus_emt", 3)),
-                          bert_required_hours=int(hours.get("campus_bert", 6)))
+                          bert_required_hours=int(hours.get("campus_bert", 6)),
+                          require_driver=cfg.get("campus_driver_policy", "prefer") == "require")
 
     errors: list[str] = []
 
