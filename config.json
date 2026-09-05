@@ -1,13 +1,13 @@
 {
-  "block_start": "2026-08-10",
-  "block_end": "2026-09-03",
+  "block_start": "2026-09-08",
+  "block_end": "2026-09-20",
   "form_csv": "form_responses.csv",
   "output_xlsx": "schedule_output.xlsx",
   "master_schedule_export": {
     "enabled": true,
     "path": "master_schedule.csv",
     "block": "F26B1",
-    "daynum_start": 810,
+    "daynum_start": 908,
     "vehicle": "R1"
   },
   "blackout_periods": [],
@@ -15,7 +15,7 @@
   "hours": {
     "ambulance_emt": 12,
     "campus_emt": 3,
-    "campus_bert": 6
+    "campus_bert": 3
   },
 
   "campus_responders_per_block": 2,
@@ -23,15 +23,28 @@
 
   "availability_requirements": {
     "ambulance": {
-      "min_day_shifts": 2,
-      "min_night_shifts": 1,
-      "min_weekend_shifts": 1
+      "min_weekday_am_shifts": 1,
+      "min_weekday_pm_shifts": 1,
+      "min_weekday_night_shifts": 1,
+      "min_weekend_day_shifts": 1,
+      "min_weekend_night_shifts": 1
     },
     "bert": {
-      "min_ab_blocks": 1,
-      "min_cd_blocks": 1
+      "min_ab_blocks": 2,
+      "min_cd_blocks": 2
     }
   },
 
-  "als_shifts": []
+  "als_shifts": [
+    "2026-09-08:NIGHT",
+    "2026-09-10:DAY",
+    "2026-09-10:NIGHT",
+    "2026-09-14:DAY",
+    "2026-09-14:NIGHT",
+    "2026-09-15:DAY",
+    "2026-09-15:NIGHT",
+    "2026-09-17:DAY",
+    "2026-09-18:NIGHT",
+    "2026-09-20:NIGHT"
+  ]
 }
