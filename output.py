@@ -262,10 +262,14 @@ def collect_warnings(
                            f"{v.full_name}: {v.assigned_hours}/{ambulance_required}h ambulance"))
     if campus_assignments is not None:
         for (d, block), people in sorted(campus_assignments.items()):
-            if not any(getattr(p, "is_driver", False) for p in people):
-                issues.append(("CAMPUS — OPEN S1", d, block,
-                               "No driver-eligible responder assigned; block left open"))
-            elif len(people) < responders_per_block:
+            if not people:
+                issues.append(("CAMPUS — OPEN BLOCK", d, block,
+                               "No responder available"))
+            elif not any(getattr(p, "is_driver", False) for p in people):
+                issues.append(("CAMPUS — DRIVER EXCEPTION", d, block,
+                               "S1 filled without a driver-eligible responder: "
+                               + ", ".join(p.full_name for p in people)))
+            if people and len(people) < responders_per_block:
                 issues.append(("CAMPUS — OPEN SEAT", d, block,
                                f"{len(people)}/{responders_per_block} responders assigned"))
     return issues
@@ -380,6 +384,10 @@ def print_summary(
     c_total = len(campus_assignments)
     c_unfilled = sum(1 for p in campus_assignments.values() if not p)
     c_full = sum(1 for p in campus_assignments.values() if len(p) >= responders_per_block)
+    c_driver_exceptions = sum(
+        1 for p in campus_assignments.values()
+        if p and not any(getattr(v, "is_driver", False) for v in p)
+    )
     emt_campus_under = sum(1 for v in volunteers if v.campus_assigned_hours < campus_emt_required)
     bert_under = sum(1 for b in bert_members if b.campus_assigned_hours < campus_bert_required)
 
@@ -395,6 +403,7 @@ def print_summary(
     print(f"  Campus blocks:               {c_total}")
     print(f"    Unfilled:                  {c_unfilled}" + (" ⚠" if c_unfilled else " ✓"))
     print(f"    Fully staffed (={responders_per_block}):        {c_full}")
+    print(f"    Driver exceptions:        {c_driver_exceptions}" + (" ⚠" if c_driver_exceptions else " ✓"))
     print(f"    EMTs under {campus_emt_required}h campus:       {emt_campus_under}" + (" ⚠" if emt_campus_under else " ✓"))
     print(f"    BERT under {campus_bert_required}h campus:       {bert_under}" + (" ⚠" if bert_under else " ✓"))
     print()
