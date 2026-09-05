@@ -19,6 +19,7 @@
   },
 
   "campus_responders_per_block": 2,
+  "campus_driver_policy": "prefer",
   "solver_time_limit_s": 30,
 
   "availability_requirements": {
