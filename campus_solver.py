@@ -13,6 +13,9 @@ Hard constraints
   - At most `responders_per_block` people per block.
   - Nobody exceeds their campus hour requirement.
   - Ambulance EMTs never overlap their assigned ambulance shifts.
+  - A driver-eligible responder (EVDT or Authorized) is preferred for S1.
+    Unless explicitly configured as required, a qualified available responder
+    still staffs S1 when no driver is available; the export flags the exception.
 
 Objective (highest priority first)
 ----------------------------------
@@ -40,6 +43,7 @@ from models import (
 W_COVER = 1_000_000     # per block with >= 1 responder
 W_SHORTFALL = -30_000   # per hour a person falls short of their campus requirement
 W_FULL = 60_000         # per additional responder up to the block target
+W_DRIVER = 1_000         # prefer a driver, without sacrificing coverage
 W_SAME_DAY = -50        # per same-person same-day block pair
 W_ADJACENT = -25        # per same-person adjacent-day block pair
 
@@ -51,6 +55,7 @@ def solve_campus(
     responders_per_block: int = 2,
     emt_required_hours: int = 3,
     bert_required_hours: int = 6,
+    require_driver: bool = False,
     time_limit_s: float = 60.0,
 ) -> dict[ShiftKey, list]:
     """
@@ -88,6 +93,24 @@ def solve_campus(
 
         covered = model.new_bool_var(f"cov_{key[0]}_{key[1]}")
         model.add(sum(assigned) >= 1).only_enforce_if(covered)
+        # A covered block must receive at least one responder.
+        model.add(sum(assigned) == 0).only_enforce_if(covered.negated())
+
+        driver_vars = [
+            y[(pi, key)]
+            for pi, p in enumerate(people)
+            if (pi, key) in y and getattr(p, "is_driver", False)
+        ]
+        if require_driver:
+            if driver_vars:
+                model.add(sum(driver_vars) >= 1).only_enforce_if(covered)
+            else:
+                model.add(covered == 0)
+        elif driver_vars:
+            has_driver = model.new_bool_var(f"campus_driver_{key[0]}_{key[1]}")
+            model.add(sum(driver_vars) >= 1).only_enforce_if(has_driver)
+            model.add(sum(driver_vars) == 0).only_enforce_if(has_driver.negated())
+            terms.append(W_DRIVER * has_driver)
         terms.append(W_COVER * covered)
 
         # Reward each responder beyond the first, up to the target.

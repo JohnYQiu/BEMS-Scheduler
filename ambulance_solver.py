@@ -67,6 +67,7 @@ def solve_ambulance(
     schedule_dates: list[date],
     als_shifts: set[ShiftKey],
     blackout_slots: set[ShiftKey] | None = None,
+    locked_assignments: list[dict] | None = None,
     required_hours: int = 12,
     time_limit_s: float = 60.0,
 ) -> dict[ShiftKey, list[Volunteer]]:
@@ -118,6 +119,21 @@ def solve_ambulance(
             for k2, var2 in pairs[i + 1:]:
                 if rest_conflict(k1, k2):
                     model.add(var1 + var2 <= 1)
+
+    # Explicit personnel selections are hard constraints, validated before
+    # solving so a typo or unavailable person never silently changes a schedule.
+    by_email = {v.email.lower(): v for v in volunteers}
+    for lock in locked_assignments or []:
+        try:
+            key = (date.fromisoformat(lock["date"]), str(lock["shift"]).upper())
+            email = str(lock["email"]).lower()
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"Invalid locked ambulance assignment {lock}: {e}") from e
+        volunteer = by_email.get(email)
+        var = x.get((email, key))
+        if volunteer is None or var is None:
+            raise ValueError(f"Locked assignment unavailable: {email} on {key[0]} {key[1]}")
+        model.add(var == 1)
 
     # ── Objective ────────────────────────────────────────────────────────────
     terms = []

@@ -27,7 +27,13 @@ from pathlib import Path
 from ambulance_solver import solve_ambulance
 from campus_solver import solve_campus
 from models import block_dates, expand_als_entries, expand_blackout_period
-from output import export_schedule_xlsx, print_summary, print_warnings, collect_warnings
+from output import (
+    collect_warnings,
+    export_master_schedule_csv,
+    export_schedule_xlsx,
+    print_summary,
+    print_warnings,
+)
 from parse_form import load_all_responses
 from validate import (
     AvailabilityRequirements,
@@ -60,6 +66,31 @@ def parse_blackout_periods(cfg: dict) -> set:
     return slots
 
 
+def load_driver_status_overrides(cfg: dict) -> dict[str, str]:
+    """Load local roster corrections without committing personnel data."""
+    overrides = dict(cfg.get("driver_status_overrides") or {})
+    path = cfg.get("driver_status_overrides_file")
+    if not path or not Path(path).exists():
+        return overrides
+    with open(path, encoding="utf-8") as f:
+        local = json.load(f)
+    if not isinstance(local, dict):
+        raise ValueError(f"driver status overrides in '{path}' must be a JSON object")
+    overrides.update(local)
+    return overrides
+
+
+def load_locked_ambulance_assignments(cfg: dict) -> list[dict]:
+    path = cfg.get("locked_ambulance_assignments_file")
+    if not path or not Path(path).exists():
+        return []
+    with open(path, encoding="utf-8") as f:
+        locks = json.load(f)
+    if not isinstance(locks, list):
+        raise ValueError(f"locked assignments in '{path}' must be a JSON array")
+    return locks
+
+
 def main() -> None:
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
     print("\n▶  Loading configuration...")
@@ -76,6 +107,7 @@ def main() -> None:
     campus_emt_required = int(hours.get("campus_emt", 3))
     campus_bert_required = int(hours.get("campus_bert", 6))
     responders_per_block = int(cfg.get("campus_responders_per_block", 2))
+    require_campus_driver = cfg.get("campus_driver_policy", "prefer") == "require"
     time_limit_s = float(cfg.get("solver_time_limit_s", 30))
     reqs = AvailabilityRequirements.from_config(cfg)
 
@@ -93,7 +125,15 @@ def main() -> None:
     print(f"\n▶  Parsing form responses from '{form_csv}'...")
     if not Path(form_csv).exists():
         sys.exit(f"ERROR: form CSV not found at '{form_csv}'.")
-    volunteers, bert_members = load_all_responses(form_csv, block_start, block_end)
+    try:
+        driver_status_overrides = load_driver_status_overrides(cfg)
+        locked_ambulance_assignments = load_locked_ambulance_assignments(cfg)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        sys.exit(f"ERROR: invalid driver status overrides: {e}")
+    volunteers, bert_members = load_all_responses(
+        form_csv, block_start, block_end,
+        driver_status_overrides=driver_status_overrides,
+    )
     if not volunteers:
         sys.exit("ERROR: no Ambulance EMT volunteers found.")
 
@@ -112,6 +152,7 @@ def main() -> None:
     print("▶  Solving ambulance schedule (CP-SAT)...")
     assignments = solve_ambulance(
         volunteers, schedule_dates, als_shifts, blackout_slots,
+        locked_assignments=locked_ambulance_assignments,
         required_hours=ambulance_required, time_limit_s=time_limit_s,
     )
 
@@ -122,6 +163,7 @@ def main() -> None:
         responders_per_block=responders_per_block,
         emt_required_hours=campus_emt_required,
         bert_required_hours=campus_bert_required,
+        require_driver=require_campus_driver,
         time_limit_s=time_limit_s,
     )
 
@@ -130,7 +172,11 @@ def main() -> None:
         assignments, campus_assignments, volunteers, bert_members, als_shifts,
         ambulance_required, campus_emt_required, campus_bert_required, responders_per_block,
     )
-    print_warnings(collect_warnings(assignments, als_shifts, volunteers, ambulance_required))
+    warnings = collect_warnings(
+        assignments, als_shifts, volunteers, ambulance_required,
+        campus_assignments, responders_per_block,
+    )
+    print_warnings(warnings)
     print("▶  Exporting...")
     export_schedule_xlsx(
         assignments, campus_assignments, volunteers + bert_members,
@@ -142,6 +188,17 @@ def main() -> None:
         campus_bert_required=campus_bert_required,
         responders_per_block=responders_per_block,
     )
+    master_export = cfg.get("master_schedule_export", {})
+    if master_export.get("enabled", True):
+        export_master_schedule_csv(
+            assignments,
+            campus_assignments,
+            block_start,
+            output_path=master_export.get("path", "master_schedule.csv"),
+            block=master_export.get("block", "F26B1"),
+            daynum_start=int(master_export.get("daynum_start", 810)),
+            vehicle=master_export.get("vehicle", "R1"),
+        )
     print("✓  Done.\n")
 
 

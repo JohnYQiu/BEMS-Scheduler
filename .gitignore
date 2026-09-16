@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .venv/
+driver_status_overrides.local.json
+locked_ambulance_assignments.local.json

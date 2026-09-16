@@ -80,13 +80,29 @@ they need a human conversation, not a better algorithm.
 | `block_start` / `block_end` | Block dates, inclusive (ISO `YYYY-MM-DD`). |
 | `form_csv` | Path to the form's CSV export. |
 | `output_xlsx` | Output workbook path. |
+| `master_schedule_export` | Optional flat CSV export for the Master Schedule. Set its `block`, `daynum_start`, and `vehicle` from the target block; F26B1 starts at `0810`. |
 | `hours.ambulance_emt` | Required (= max) ambulance hours per EMT this block. |
 | `hours.campus_emt` / `hours.campus_bert` | Required (= max) campus hours per role. |
 | `campus_responders_per_block` | Staffing target per campus block. |
+| `campus_driver_policy` | `prefer` (default) fills S1 with an available non-driver when necessary and flags it; use `require` only to leave such blocks open. |
+| `driver_status_overrides_file` | Local, Git-ignored JSON file of roster-based corrections keyed by email. It overrides self-reported credentials without publishing personnel data. |
+| `locked_ambulance_assignments_file` | Local, Git-ignored JSON array of chosen ambulance assignments: `{"date":"2026-09-08","shift":"AM","email":"person@brown.edu"}`. |
 | `solver_time_limit_s` | Solver budget per stage (30s is plenty; raise for huge blocks). |
 | `availability_requirements` | Minimum shifts/blocks people must *submit* (drives the Strike List). |
 | `als_shifts` | `"YYYY-MM-DD:DAY"` / `"YYYY-MM-DD:NIGHT"` entries; weekday `DAY` covers AM+PM. |
 | `blackout_periods` | `{start_date, start_shift, end_date, end_shift}` ranges removed from the block. |
+
+`master_schedule.csv` has the exact column order used by the Master Schedule:
+`Block, ShiftID, Date, Shift, Vehicle, Seat, Requires, Assigned/Name`.
+It is deliberately a local export only; review it, then paste the rows into the
+Sheet. The scheduler never calls the Google Sheets or Google Calendar APIs.
+
+For F26B1, `config.json` is set to August 10–September 3, 2026 and a day
+number start of `810`. Populate `als_shifts` from the approved F26B1 ALS list
+before each live run—the historical Spring list was removed rather than reused.
+The parser accepts both the legacy separate-shift grids and the current
+weekly-grid form format, so the availability-format decision does not require
+code changes as long as the documented header phrases are retained.
 
 ## Files
 

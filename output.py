@@ -14,6 +14,7 @@ Sheets:
 
 from __future__ import annotations
 
+import csv
 from datetime import date, timedelta
 
 from openpyxl import Workbook
@@ -25,6 +26,7 @@ from models import (
     SHIFT_TIMES,
     ShiftKey,
     Volunteer,
+    crew_cap,
     is_big_weekend,
 )
 
@@ -233,7 +235,14 @@ def _build_summary_sheet(ws, people, ambulance_required, campus_emt_required, ca
 
 # ── Sheet 4: Warnings ────────────────────────────────────────────────────────
 
-def collect_warnings(assignments, als_shifts, volunteers, ambulance_required) -> list[tuple]:
+def collect_warnings(
+    assignments,
+    als_shifts,
+    volunteers,
+    ambulance_required,
+    campus_assignments=None,
+    responders_per_block: int = 2,
+) -> list[tuple]:
     """[(type, date, shift, details)] for everything worth a human look."""
     issues = []
     for key in sorted(assignments):
@@ -252,6 +261,18 @@ def collect_warnings(assignments, als_shifts, volunteers, ambulance_required) ->
         if v.assigned_hours < ambulance_required:
             issues.append(("UNDER HOURS", None, "",
                            f"{v.full_name}: {v.assigned_hours}/{ambulance_required}h ambulance"))
+    if campus_assignments is not None:
+        for (d, block), people in sorted(campus_assignments.items()):
+            if not people:
+                issues.append(("CAMPUS — OPEN BLOCK", d, block,
+                               "No responder available"))
+            elif not any(getattr(p, "is_driver", False) for p in people):
+                issues.append(("CAMPUS — DRIVER EXCEPTION", d, block,
+                               "S1 filled without a driver-eligible responder: "
+                               + ", ".join(p.full_name for p in people)))
+            if people and len(people) < responders_per_block:
+                issues.append(("CAMPUS — OPEN SEAT", d, block,
+                               f"{len(people)}/{responders_per_block} responders assigned"))
     return issues
 
 
@@ -321,7 +342,10 @@ def export_schedule_xlsx(
         output_path = output_path.rsplit(".", 1)[0] + ".xlsx"
 
     volunteers = [p for p in people if isinstance(p, Volunteer)]
-    issues = collect_warnings(assignments, als_shifts, volunteers, ambulance_required)
+    issues = collect_warnings(
+        assignments, als_shifts, volunteers, ambulance_required,
+        campus_assignments, responders_per_block,
+    )
 
     wb = Workbook()
     _build_schedule_sheet(wb.active, assignments)
@@ -361,6 +385,10 @@ def print_summary(
     c_total = len(campus_assignments)
     c_unfilled = sum(1 for p in campus_assignments.values() if not p)
     c_full = sum(1 for p in campus_assignments.values() if len(p) >= responders_per_block)
+    c_driver_exceptions = sum(
+        1 for p in campus_assignments.values()
+        if p and not any(getattr(v, "is_driver", False) for v in p)
+    )
     emt_campus_under = sum(1 for v in volunteers if v.campus_assigned_hours < campus_emt_required)
     bert_under = sum(1 for b in bert_members if b.campus_assigned_hours < campus_bert_required)
 
@@ -376,6 +404,7 @@ def print_summary(
     print(f"  Campus blocks:               {c_total}")
     print(f"    Unfilled:                  {c_unfilled}" + (" ⚠" if c_unfilled else " ✓"))
     print(f"    Fully staffed (={responders_per_block}):        {c_full}")
+    print(f"    Driver exceptions:        {c_driver_exceptions}" + (" ⚠" if c_driver_exceptions else " ✓"))
     print(f"    EMTs under {campus_emt_required}h campus:       {emt_campus_under}" + (" ⚠" if emt_campus_under else " ✓"))
     print(f"    BERT under {campus_bert_required}h campus:       {bert_under}" + (" ⚠" if bert_under else " ✓"))
     print()
@@ -392,3 +421,116 @@ def print_warnings(issues: list[tuple]) -> None:
         extra = f" — {detail}" if d and detail else ""
         print(f"  ⚠  {type_}: {where}{extra}")
     print()
+
+
+# ── Master Schedule CSV ─────────────────────────────────────────────────────
+
+MASTER_SCHEDULE_HEADER = [
+    "Block", "ShiftID", "Date", "Shift", "Vehicle", "Seat", "Requires", "Assigned/Name",
+]
+
+
+def _date_for_master_schedule(d: date) -> str:
+    """Portable M/D/YY formatting (strftime %-m is not portable to Windows)."""
+    return f"{d.month}/{d.day}/{d:%y}"
+
+
+def _day_number(d: date, block_start: date, daynum_start: int) -> str:
+    return f"{daynum_start + (d - block_start).days:04d}"
+
+
+def _ambulance_master_rows(assignments, block_start, block, daynum_start, vehicle):
+    rows = []
+    for (d, shift), people in sorted(assignments.items()):
+        daynum = _day_number(d, block_start, daynum_start)
+        cap = crew_cap(d, shift)
+
+        # EVDT is the preferred Driver seat. If there is no EVDT and the shift
+        # still has an open crew seat, keep Driver open for a later EVDT pickup
+        # and place any AUTH member into C2/C3/C4 instead. Once the shift is
+        # otherwise full, an AUTH member may move into Driver so the crew fits.
+        evdt_driver = next((p for p in people if getattr(p, "is_evdt", False)), None)
+        auth_driver = next(
+            (p for p in people if getattr(p, "is_driver", False) and not getattr(p, "is_evdt", False)),
+            None,
+        )
+        shift_full = len(people) >= cap
+
+        primary_driver = evdt_driver
+        driver_exception = False
+        if primary_driver is None and shift_full:
+            if auth_driver is not None:
+                primary_driver = auth_driver
+            elif people:
+                # Final fallback: only use a crew-only EMT in Driver when the
+                # shift is otherwise full and there is no driver-qualified EMT.
+                primary_driver = people[0]
+                driver_exception = True
+
+        crew_people = [p for p in people if p is not primary_driver]
+        # When Driver is intentionally left open, put AUTH-qualified members at
+        # the front of the crew rows. This yields AUTH in C2 and moves existing
+        # crew to C3/C4, preserving the EVDT opening.
+        if primary_driver is None:
+            crew_people = sorted(
+                crew_people,
+                key=lambda p: (
+                    0 if getattr(p, "is_driver", False) else 1,
+                    p.full_name,
+                ),
+            )
+
+        seats = []
+        if primary_driver is not None:
+            if driver_exception:
+                seats.append(("Driver", "CREW", "DRVX", primary_driver))
+            else:
+                driver_kind = "EVDT" if primary_driver.is_evdt else "AUTH"
+                seats.append(("Driver", driver_kind, driver_kind, primary_driver))
+        else:
+            seats.append(("Driver", "EVDT", "EVDT", None))
+
+        for i, person in enumerate(crew_people, start=2):
+            seats.append((f"C{i}", "CREW", f"C{i}", person))
+        while len(seats) < cap:
+            number = len(seats) + 1
+            seats.append((f"C{number}", "CREW", f"C{number}", None))
+        for seat, requires, suffix, person in seats:
+            shift_id = f"{block}-{daynum}-{shift}-{vehicle}-{suffix}"
+            rows.append([block, shift_id, _date_for_master_schedule(d), shift,
+                         vehicle, seat, requires, person.full_name if person else ""])
+    return rows
+
+
+def _campus_master_rows(campus_assignments, block_start, block, daynum_start):
+    rows = []
+    for (d, campus_block), people in sorted(campus_assignments.items()):
+        daynum = _day_number(d, block_start, daynum_start)
+        ordered = sorted(people, key=lambda p: (not getattr(p, "is_driver", False), p.full_name))
+        for i in range(1, 3):
+            person = ordered[i - 1] if i <= len(ordered) else None
+            seat = f"S{i}"
+            shift_id = f"{block}-{daynum}-{campus_block}-CR-{seat}"
+            rows.append([block, shift_id, _date_for_master_schedule(d), campus_block,
+                         "CR", seat, "AUTH" if seat == "S1" else "CREW", person.full_name if person else ""])
+    return rows
+
+
+def export_master_schedule_csv(
+    assignments,
+    campus_assignments,
+    block_start: date,
+    output_path: str = "master_schedule.csv",
+    block: str = "F26B1",
+    daynum_start: int = 810,
+    vehicle: str = "R1",
+) -> str:
+    """Write flat A:H rows that can be pasted into Master Schedule row 2."""
+    rows = _ambulance_master_rows(assignments, block_start, block, daynum_start, vehicle)
+    rows += _campus_master_rows(campus_assignments, block_start, block, daynum_start)
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(MASTER_SCHEDULE_HEADER)
+        writer.writerows(rows)
+    print(f"  Master Schedule CSV exported -> {output_path} ({len(rows)} rows)")
+    return output_path

@@ -15,6 +15,7 @@ from datetime import date
 
 from ambulance_solver import solve_ambulance
 from campus_solver import solve_campus
+from main import load_driver_status_overrides, load_locked_ambulance_assignments
 from models import (
     SHIFT_HOURS,
     block_dates,
@@ -36,13 +37,18 @@ def main() -> None:
     hours = cfg.get("hours", {})
     required = int(hours.get("ambulance_emt", 12))
 
-    volunteers, bert_members = load_all_responses(cfg["form_csv"], block_start, block_end)
+    volunteers, bert_members = load_all_responses(
+        cfg["form_csv"], block_start, block_end,
+        driver_status_overrides=load_driver_status_overrides(cfg),
+    )
     assignments = solve_ambulance(volunteers, schedule_dates, als_shifts,
+                                  locked_assignments=load_locked_ambulance_assignments(cfg),
                                   required_hours=required)
     campus = solve_campus(volunteers, bert_members, schedule_dates,
                           responders_per_block=int(cfg.get("campus_responders_per_block", 2)),
                           emt_required_hours=int(hours.get("campus_emt", 3)),
-                          bert_required_hours=int(hours.get("campus_bert", 6)))
+                          bert_required_hours=int(hours.get("campus_bert", 6)),
+                          require_driver=cfg.get("campus_driver_policy", "prefer") == "require")
 
     errors: list[str] = []
 

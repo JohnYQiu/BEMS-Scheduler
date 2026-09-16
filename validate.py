@@ -27,6 +27,13 @@ class AvailabilityRequirements:
     emt_min_weekend_shifts: int = 1  # weekend DAY or NIGHT selections
     bert_min_ab_blocks: int = 1      # A or B selections
     bert_min_cd_blocks: int = 1      # C or D selections
+    # When supplied, these model the Fall shopping-period form exactly. The
+    # zero defaults preserve the prior generic validation for older forms.
+    emt_min_weekday_am_shifts: int = 0
+    emt_min_weekday_pm_shifts: int = 0
+    emt_min_weekday_night_shifts: int = 0
+    emt_min_weekend_day_shifts: int = 0
+    emt_min_weekend_night_shifts: int = 0
 
     @classmethod
     def from_config(cls, cfg: dict) -> "AvailabilityRequirements":
@@ -39,6 +46,11 @@ class AvailabilityRequirements:
             emt_min_weekend_shifts=int(emt.get("min_weekend_shifts", 1)),
             bert_min_ab_blocks=int(bert.get("min_ab_blocks", 1)),
             bert_min_cd_blocks=int(bert.get("min_cd_blocks", 1)),
+            emt_min_weekday_am_shifts=int(emt.get("min_weekday_am_shifts", 0)),
+            emt_min_weekday_pm_shifts=int(emt.get("min_weekday_pm_shifts", 0)),
+            emt_min_weekday_night_shifts=int(emt.get("min_weekday_night_shifts", 0)),
+            emt_min_weekend_day_shifts=int(emt.get("min_weekend_day_shifts", 0)),
+            emt_min_weekend_night_shifts=int(emt.get("min_weekend_night_shifts", 0)),
         )
 
 
@@ -48,6 +60,39 @@ def check_ambulance_requirements(
     """Volunteers whose submitted availability falls short of the form's minimums."""
     violations = []
     for v in volunteers:
+        strict_form_requirements = any((
+            reqs.emt_min_weekday_am_shifts,
+            reqs.emt_min_weekday_pm_shifts,
+            reqs.emt_min_weekday_night_shifts,
+            reqs.emt_min_weekend_day_shifts,
+            reqs.emt_min_weekend_night_shifts,
+        ))
+        if strict_form_requirements:
+            weekday_am = sum(1 for (d, s) in v.available if d.weekday() < 5 and s == "AM")
+            weekday_pm = sum(1 for (d, s) in v.available if d.weekday() < 5 and s == "PM")
+            # Sunday night counts as a weekday night; Friday and Saturday
+            # nights are reserved for the separate weekend-night requirement.
+            weekday_night = sum(
+                1 for (d, s) in v.available
+                if s == "NIGHT" and d.weekday() in (0, 1, 2, 3, 6)
+            )
+            weekend_day = sum(
+                1 for (d, s) in v.available if s == "DAY" and d.weekday() in (5, 6)
+            )
+            weekend_night = sum(
+                1 for (d, s) in v.available if s == "NIGHT" and d.weekday() in (4, 5)
+            )
+            values = (
+                ("weekday AM shifts", weekday_am, reqs.emt_min_weekday_am_shifts),
+                ("weekday PM shifts", weekday_pm, reqs.emt_min_weekday_pm_shifts),
+                ("weekday night shifts", weekday_night, reqs.emt_min_weekday_night_shifts),
+                ("weekend day shifts", weekend_day, reqs.emt_min_weekend_day_shifts),
+                ("weekend night shifts", weekend_night, reqs.emt_min_weekend_night_shifts),
+            )
+            missing = [f"{label} ({actual}/{minimum})" for label, actual, minimum in values if actual < minimum]
+            if missing:
+                violations.append({"volunteer": v, "missing": missing})
+            continue
         day = sum(1 for (d, s) in v.available if s in ("AM", "PM"))
         night = sum(1 for (d, s) in v.available if s == "NIGHT")
         weekend = sum(1 for (d, s) in v.available if is_weekend(d))
