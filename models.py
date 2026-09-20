@@ -9,6 +9,7 @@ ShiftKey = tuple[date, str]
 SHIFT_HOURS = {"AM": 6, "PM": 6, "NIGHT": 12, "DAY": 12}
 SHIFT_TIMES = {"AM": ("0700", "1300"), "PM": ("1300", "1900"),
                "NIGHT": ("1900", "0700+1"), "DAY": ("0700", "1900")}
+WEEKEND_PRIORITY_LABELS = ("Friday nights", "Saturday nights", "Saturday days", "Sunday days")
 CAMPUS_BLOCKS = ("A", "B", "C", "D")
 CAMPUS_BLOCK_HOURS = 3
 CAMPUS_BLOCK_TIMES = {"A": "0700-1000", "B": "1000-1300",
@@ -18,6 +19,7 @@ START_HOURS = {"AM": 7, "PM": 13, "DAY": 7, "NIGHT": 19,
 
 
 def is_weekend(d: date) -> bool:
+    """Calendar weekend; staffing priorities depend on both date and shift."""
     return d.weekday() >= 5
 
 
@@ -33,8 +35,17 @@ def is_weekend_day(d: date, kind: str) -> bool:
     return kind == "DAY" and is_weekend(d)
 
 
+def weekend_priority(d: date, kind: str) -> int | None:
+    """Staffing order: Friday night, Saturday night, Saturday day, Sunday day."""
+    if is_weekend_night(d, kind):
+        return d.weekday() - 4
+    if is_weekend_day(d, kind):
+        return d.weekday() - 3
+    return None
+
+
 def is_big_weekend(d: date, kind: str) -> bool:
-    return is_weekend_night(d, kind) or is_weekend_day(d, kind)
+    return weekend_priority(d, kind) is not None
 
 
 def crew_cap(d: date, kind: str) -> int:

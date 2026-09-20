@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 from ortools.sat.python import cp_model
 
-from models import BertMember, HourCaps, LockedAssignment, Volunteer
+from models import BertMember, HourCaps, LockedAssignment, Volunteer, is_big_weekend, weekend_priority
 from solver import _optimize, solve_schedule
 from validation import validate_schedule
 
@@ -114,6 +114,73 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(result.ambulance[(D, 'AM')], [])
         self.assertEqual(result.campus[(D, 'A')], [p])
 
+    def test_weekend_definition_and_priority_excludes_friday_day_and_sunday_night(self):
+        expected = {(4, 'NIGHT'): 0, (5, 'NIGHT'): 1, (5, 'DAY'): 2, (6, 'DAY'): 3}
+        for offset in range(7):
+            for kind in ('AM', 'PM', 'DAY', 'NIGHT'):
+                with self.subTest(offset=offset, kind=kind):
+                    day = D + timedelta(days=offset)
+                    self.assertEqual(weekend_priority(day, kind), expected.get((offset, kind)))
+                    self.assertEqual(is_big_weekend(day, kind), (offset, kind) in expected)
+
+    def test_split_crews_follow_friday_saturday_nights_then_saturday_sunday_days(self):
+        groups = [(4, 'NIGHT'), (5, 'NIGHT'), (5, 'DAY'), (6, 'DAY')]
+        for higher in range(len(groups)):
+            for lower in range(higher + 1, len(groups)):
+                with self.subTest(higher=higher, lower=lower):
+                    first = (D + timedelta(days=groups[higher][0]), groups[higher][1])
+                    second = (D + timedelta(days=groups[lower][0]), groups[lower][1])
+                    flexible = emt('Flexible', ambulance={first, second})
+                    people = [flexible, emt('FirstAuth', 'Auth', {first}), emt('FirstEMT', ambulance={first}),
+                              emt('SecondAuth', 'Auth', {second}), emt('SecondEMT', ambulance={second})]
+                    result = self.solve(people, {first: 'BLS', second: 'BLS'}, caps=HourCaps(12, 0, 9))
+                    self.assertEqual(flexible.assigned, [first])
+                    self.assertEqual(len(result.ambulance[first]), 3)
+                    self.assertEqual(len(result.ambulance[second]), 2)
+
+    def test_one_night_split_crew_outranks_two_weekend_day_split_crews(self):
+        night = (D + timedelta(days=4), 'NIGHT')
+        saturday, sunday = (D + timedelta(days=5), 'DAY'), (D + timedelta(days=6), 'DAY')
+        first, second = emt('First', ambulance={night, saturday}), emt('Second', ambulance={night, sunday})
+        people = [first, second, emt('NightAuth', 'Auth', {night}),
+                  emt('SaturdayAuth', 'Auth', {saturday}), emt('SaturdayEMT', ambulance={saturday}),
+                  emt('SundayAuth', 'Auth', {sunday}), emt('SundayEMT', ambulance={sunday})]
+        result = self.solve(people, {night: 'BLS', saturday: 'BLS', sunday: 'BLS'}, caps=HourCaps(12, 0, 9))
+        self.assertEqual(first.assigned, [night])
+        self.assertEqual(second.assigned, [night])
+        self.assertEqual([len(result.ambulance[k]) for k in (night, saturday, sunday)], [3, 2, 2])
+
+    def test_saturday_night_split_crew_outranks_fourth_friday_volunteer(self):
+        friday, saturday = (D + timedelta(days=4), 'NIGHT'), (D + timedelta(days=5), 'NIGHT')
+        flexible = emt('Flexible', ambulance={friday, saturday})
+        people = [flexible, emt('FridayAuth', 'Auth', {friday}), emt('Friday1', ambulance={friday}),
+                  emt('Friday2', ambulance={friday}), emt('SaturdayAuth', 'Auth', {saturday}),
+                  emt('SaturdayEMT', ambulance={saturday})]
+        result = self.solve(people, {friday: 'BLS', saturday: 'BLS'}, caps=HourCaps(12, 0, 9))
+        self.assertEqual(flexible.assigned, [saturday])
+        self.assertEqual([len(result.ambulance[k]) for k in (friday, saturday)], [3, 3])
+
+    def test_fourth_night_volunteer_outranks_completing_weekend_day_split_crew(self):
+        for offset in (4, 5):
+            with self.subTest(night_offset=offset):
+                night, day = (D + timedelta(days=offset), 'NIGHT'), (D + timedelta(days=6), 'DAY')
+                flexible = emt('Flexible', ambulance={night, day})
+                people = [flexible, emt('NightAuth', 'Auth', {night}), emt('Night1', ambulance={night}),
+                          emt('Night2', ambulance={night}), emt('DayAuth', 'Auth', {day}),
+                          emt('DayEMT', ambulance={day})]
+                result = self.solve(people, {night: 'BLS', day: 'BLS'}, caps=HourCaps(12, 0, 9))
+                self.assertEqual(flexible.assigned, [night])
+                self.assertEqual([len(result.ambulance[k]) for k in (night, day)], [4, 2])
+
+    def test_bls_night_split_crew_outranks_weekend_day_als_driver(self):
+        night, day = (D + timedelta(days=4), 'NIGHT'), (D + timedelta(days=5), 'DAY')
+        driver = emt('Driver', 'EVDT', {night, day})
+        people = [driver, emt('NightAuth', 'Auth', {night}), emt('NightEMT', ambulance={night}),
+                  emt('DayEMT', ambulance={day})]
+        result = self.solve(people, {night: 'BLS', day: 'ALS'}, caps=HourCaps(12, 0, 9))
+        self.assertEqual(driver.assigned, [night])
+        self.assertTrue(all(result.ambulance.values()))
+
     def test_coverage_outranks_evdt_placement(self):
         friday = D + timedelta(days=4)
         keys = {(D, 'AM'): 'BLS', (D, 'PM'): 'BLS', (friday, 'NIGHT'): 'ALS'}
@@ -166,7 +233,7 @@ class SchedulingTests(unittest.TestCase):
                 people = [emt('Truck', truck_cert, {key}), emt('Utility', second_cert, {key}),
                           emt('Crew', ambulance={key})]
                 result = self.solve(people, {key: 'ALS'}, caps=HourCaps(12, 0, 9))
-                ready = next(s for s in result.stages if s.name == 'Weekend shifts ready for split crew')
+                ready = next(s for s in result.stages if s.name == 'Saturday days: shifts ready for split crew')
                 self.assertEqual(ready.value, expected_ready)
                 self.assertEqual(len(result.ambulance[key]), 3)
 
