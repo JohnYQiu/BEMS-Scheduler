@@ -1,13 +1,16 @@
-form_responses.csv
-schedule_output.xlsx
-schedule_output.csv
+# Python environment and generated caches
+.venv/
 __pycache__/
 *.py[cod]
+
+# Local tool and macOS settings
+.claude/
 .DS_Store
-.venv/
-driver_status_overrides.local.json
-locked_ambulance_assignments.local.json
 *.local.json
-inputs/
-outputs/
-master_schedule.csv
+
+# Private inputs and generated schedules
+/inputs/
+/outputs/
+/*.csv
+/*.csv.zip
+/*.xlsx
