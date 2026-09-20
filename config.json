@@ -1,7 +1,7 @@
 {
   "block_start": "2026-09-21",
   "block_end": "2026-10-18",
-  "form_csv": "inputs/block2.csv.zip",
+  "form_csv": "inputs/form_responses.csv.zip",
   "output_xlsx": "outputs/schedule.xlsx",
   "hours": {
     "ambulance_emt": 18,

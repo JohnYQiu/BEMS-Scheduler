@@ -137,15 +137,100 @@ class SchedulingTests(unittest.TestCase):
         self.solve(people, {weekday: 'ALS', weekend: 'ALS'}, caps=HourCaps(12, 0, 9))
         self.assertEqual(driver.assigned, [weekend])
 
-    def test_bls_weekend_does_not_take_evdt_from_weekday_als(self):
+    def test_bls_weekend_needs_three_with_a_driver_before_weekday_als(self):
+        weekday, weekend = (D, 'NIGHT'), (D + timedelta(days=4), 'NIGHT')
+        for existing_crew in (1, 2, 3):
+            with self.subTest(existing_crew=existing_crew):
+                driver = emt('Driver', 'EVDT', {weekday, weekend})
+                people = [driver, emt('Auth', 'Auth', {weekend}), emt('Weekday', ambulance={weekday})]
+                people.extend(emt(f'Crew{i}', ambulance={weekend}) for i in range(existing_crew - 1))
+                result = self.solve(people, {weekday: 'ALS', weekend: 'BLS'}, caps=HourCaps(12, 0, 9))
+                self.assertTrue(all(result.ambulance.values()))
+                self.assertEqual(driver.assigned, [weekend if existing_crew < 3 else weekday])
+                self.assertEqual(len(result.ambulance[weekend]), min(existing_crew + 1, 3))
+
+    def test_three_weekend_emts_without_a_driver_still_need_the_evdt(self):
         weekday, weekend = (D, 'NIGHT'), (D + timedelta(days=4), 'NIGHT')
         driver = emt('Driver', 'EVDT', {weekday, weekend})
-        auth = emt('Auth', 'Auth', {weekend})
-        crew = emt('Crew', ambulance={weekday})
-        result = self.solve([driver, auth, crew], {weekday: 'ALS', weekend: 'BLS'}, caps=HourCaps(12, 0, 9))
-        self.assertEqual(driver.assigned, [weekday])
-        utility = next(s for s in result.stages if s.name == 'Weekend BLS shifts with Utility driver')
-        self.assertEqual(utility.value, 1)
+        people = [driver, emt('Weekday', ambulance={weekday})]
+        people.extend(emt(f'Crew{i}', ambulance={weekend}) for i in range(3))
+        result = self.solve(people, {weekday: 'ALS', weekend: 'BLS'}, caps=HourCaps(12, 0, 9))
+        self.assertEqual(driver.assigned, [weekend])
+        self.assertGreaterEqual(len(result.ambulance[weekend]), 3)
+
+    def test_als_split_crew_needs_two_distinct_qualified_drivers(self):
+        key = (D + timedelta(days=5), 'DAY')
+        for truck_cert, second_cert, expected_ready in [('EVDT', 'EMT', 0), ('EVDT', 'Auth', 1),
+                                                        ('EVDT', 'EVDT', 1), ('Auth', 'Auth', 0)]:
+            with self.subTest(truck_cert=truck_cert, second_cert=second_cert):
+                people = [emt('Truck', truck_cert, {key}), emt('Utility', second_cert, {key}),
+                          emt('Crew', ambulance={key})]
+                result = self.solve(people, {key: 'ALS'}, caps=HourCaps(12, 0, 9))
+                ready = next(s for s in result.stages if s.name == 'Weekend shifts ready for split crew')
+                self.assertEqual(ready.value, expected_ready)
+                self.assertEqual(len(result.ambulance[key]), 3)
+
+    def test_three_person_split_crews_outrank_a_fourth_weekend_volunteer(self):
+        first, second = (D + timedelta(days=4), 'NIGHT'), (D + timedelta(days=11), 'NIGHT')
+        flexible = emt('Flexible', ambulance={first, second})
+        people = [flexible, emt('FirstAuth', 'Auth', {first}), emt('First1', ambulance={first}),
+                  emt('First2', ambulance={first}), emt('SecondAuth', 'Auth', {second}),
+                  emt('Second1', ambulance={second})]
+        result = self.solve(people, {first: 'BLS', second: 'BLS'}, caps=HourCaps(12, 0, 9))
+        self.assertEqual(flexible.assigned, [second])
+        self.assertEqual([len(result.ambulance[k]) for k in (first, second)], [3, 3])
+
+    def test_ordinary_nights_do_not_get_the_weekend_staffing_priority(self):
+        weekend = (D + timedelta(days=4), 'NIGHT')
+        for offset in (3, 6):  # Thursday and Sunday nights are ordinary nights.
+            with self.subTest(offset=offset):
+                ordinary = (D + timedelta(days=offset), 'NIGHT')
+                flexible = emt('Flexible', ambulance={ordinary, weekend})
+                people = [flexible, emt('Ordinary', 'Auth', {ordinary}), emt('Weekend', 'Auth', {weekend})]
+                result = self.solve(people, {ordinary: 'BLS', weekend: 'BLS'}, caps=HourCaps(12, 0, 9))
+                self.assertEqual(flexible.assigned, [weekend])
+                self.assertEqual(len(result.ambulance[ordinary]), 1)
+
+    def test_weekend_crews_fill_before_adding_weekday_seats(self):
+        weekdays = {(D, 'AM'), (D, 'PM')}
+        weekend_types = [(4, 'NIGHT'), (5, 'NIGHT'), (5, 'DAY'), (6, 'DAY')]
+        for offset, kind in weekend_types:
+            for provider in ('ALS', 'BLS'):
+                with self.subTest(offset=offset, kind=kind, provider=provider):
+                    weekend = (D + timedelta(days=offset), kind)
+                    flexible = emt('Flexible', ambulance=weekdays | {weekend})
+                    people = [flexible, emt('Day', ambulance=weekdays),
+                              emt('Driver', 'EVDT' if provider == 'ALS' else 'Auth', {weekend}),
+                              emt('Crew1', ambulance={weekend}), emt('Crew2', ambulance={weekend})]
+                    providers = {k: 'BLS' for k in weekdays}
+                    providers[weekend] = provider
+                    result = self.solve(people, providers, caps=HourCaps(12, 0, 9))
+                    self.assertEqual(flexible.assigned, [weekend])
+                    self.assertEqual(len(result.ambulance[weekend]), 4)
+                    self.assertTrue(all(len(result.ambulance[k]) == 1 for k in weekdays))
+
+    def test_weekend_staffing_outranks_total_hours_without_losing_coverage(self):
+        weekday_night = (D + timedelta(days=2), 'NIGHT')
+        friday_am, friday_night = (D + timedelta(days=4), 'AM'), (D + timedelta(days=4), 'NIGHT')
+        keys = {weekday_night, friday_am, friday_night}
+        flexible = emt('Flexible', ambulance=keys)
+        people = [flexible, emt('Night', ambulance={weekday_night}),
+                  emt('Morning', ambulance={friday_am}), emt('Driver', 'Auth', {friday_night})]
+        result = self.solve(people, {k: 'BLS' for k in keys})
+        self.assertTrue(all(result.ambulance.values()))
+        self.assertEqual(flexible.assigned, [friday_night])
+        self.assertEqual(flexible.assigned_hours, 12)
+        self.assertEqual(len(result.ambulance[friday_night]), 2)
+
+    def test_extra_weekday_seats_do_not_outrank_campus_coverage(self):
+        weekdays = {(D, 'AM'), (D, 'PM')}
+        night = (D + timedelta(days=3), 'NIGHT')
+        flexible = emt('Flexible', ambulance=weekdays | {night}, campus={(D, 'C'), (D, 'D')})
+        people = [flexible, emt('Day', ambulance=weekdays), emt('Night', ambulance={night})]
+        result = self.solve(people, caps=HourCaps(12, 6, 9))
+        self.assertTrue(all(result.ambulance.values()))
+        self.assertEqual(flexible.assigned, [night])
+        self.assertEqual(flexible.campus_assigned_hours, 6)
 
     def test_weekday_bls_has_no_driver_objective(self):
         p = emt('Driver', 'EVDT', {(D, 'AM')})

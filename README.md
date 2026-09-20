@@ -54,7 +54,7 @@ this entry in `config.json`:
 ```
 
 **Already have a ZIP?** You can use it without extracting it. The current Block 2
-configuration points to `inputs/block2.csv.zip`. The ZIP must contain exactly one
+configuration points to `inputs/form_responses.csv.zip`. The ZIP must contain exactly one
 CSV. Choose either a plain CSV or a ZIP and make `form_csv` match the file you use.
 Any filename is fine; paths are relative to the folder containing `config.json`.
 
@@ -201,18 +201,38 @@ Auth or EVDT can drive Utility for split crew while the supervisor drives the
 ambulance. They are equally eligible for Utility. Weekday BLS shifts have no
 driver preference. EVDTs remain eligible for campus work under the usual rules.
 
+Friday/Saturday nights and Saturday/Sunday days have an explicit staffing
+priority. A BLS shift is ready for split crew with **three volunteers, including
+at least one Auth or EVDT**: supervisor + EMT on the ambulance, driver + EMT on
+Utility. An ALS split crew needs three volunteers including an EVDT for the
+ambulance and a **second, distinct Auth or EVDT** for Utility.
+
+Getting weekends to that three-person crew takes priority over placing an EVDT
+on weekday ALS. Once a BLS weekend has three people and a qualified driver, the
+weekday ALS shift takes priority over adding the EVDT as a fourth volunteer.
+Remaining weekend seats are filled before adding hours on weekdays. Weekday
+shifts still receive basic coverage, but filling all their seats is not an objective.
+
 The solver applies these priorities in order, preserving each earlier attained
 result while choosing later assignments:
 
 1. Ambulance shifts with at least one EMT alongside the supervisor.
-2. Ambulance hours within individual caps.
-3. ALS Friday/Saturday nights with an EVDT.
-4. ALS Saturday/Sunday days with an EVDT.
-5. Other ALS shifts with an EVDT.
-6. BLS weekend split-crew shifts with an Auth or EVDT.
-7. Filled ambulance volunteer seats.
-8. Campus blocks with at least one responder.
-9. Campus hours within individual caps.
+2. ALS Friday/Saturday nights with an EVDT.
+3. ALS Saturday/Sunday days with an EVDT.
+4. Weekend shifts ready for split crew: three volunteers and the required drivers.
+5. Weekend staffing toward three volunteers per shift, including shifts that cannot yet form a complete split crew.
+6. BLS weekend shifts with an Auth or EVDT for Utility.
+7. Other ALS shifts with an EVDT.
+8. Filled weekend volunteer seats, up to the existing four-person capacity.
+9. Ambulance hours within individual caps.
+10. Campus blocks with at least one responder.
+11. Campus hours within individual caps.
+
+Thus a fourth weekend volunteer is a lower priority than bringing another
+weekend shift to three. A person may stay below their hour target when that
+improves weekend staffing; all hour, availability, overlap, and rest limits remain
+hard constraints. Sunday nights and Friday daytime shifts are not in the weekend
+staffing priority.
 
 `solver_time_limit_s` is a total search budget shared across stages. `OPTIMAL`
 means a stage was proved optimal given earlier attained results; `FEASIBLE`

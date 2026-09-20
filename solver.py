@@ -23,6 +23,15 @@ def _present(model, variables, name):
     return present
 
 
+def _at_least(model, variables, minimum, name):
+    if len(variables) < minimum:
+        return 0
+    enough = model.new_bool_var(name)
+    model.add(sum(variables) >= minimum).only_enforce_if(enough)
+    model.add(sum(variables) < minimum).only_enforce_if(enough.Not())
+    return enough
+
+
 def _optimize(model, objectives, time_limit_s, workers):
     """Preserve each stage's best result; share one time budget across stages.
 
@@ -158,9 +167,29 @@ def solve_schedule(
         model.add(var == 1)
 
     coverage, als_nights, als_days, als_other, utility, campus_coverage = [], [], [], [], [], []
+    weekend_ready, weekend_core, weekend_seats = [], [], []
     for key in sorted(providers):
         entries = amb_by_key[key]
         coverage.append(_present(model, [v for _, v in entries], f"covered_{key}"))
+        if is_big_weekend(*key) and entries:
+            crew = [v for _, v in entries]
+            drivers = [v for pi, v in entries if people[pi].is_driver]
+            evdts = [v for pi, v in entries if people[pi].is_evdt]
+            weekend_seats.extend(crew)
+            core = model.new_int_var(0, 3, f"weekend_core_{key}")
+            model.add_min_equality(core, [sum(crew), 3])
+            weekend_core.append(core)
+            # BLS: supervisor + EMT, Utility driver + EMT (three volunteers).
+            # ALS also needs a separate EVDT on the ambulance while the
+            # supervisor treats; one volunteer cannot drive both vehicles.
+            requirements = [_at_least(model, crew, 3, f"split_size_{key}"),
+                            _at_least(model, drivers, 2 if providers[key] == "ALS" else 1,
+                                      f"split_drivers_{key}")]
+            if providers[key] == "ALS":
+                requirements.append(_at_least(model, evdts, 1, f"split_evdt_{key}"))
+            ready = model.new_bool_var(f"split_ready_{key}")
+            model.add_min_equality(ready, requirements)
+            weekend_ready.append(ready)
         if providers[key] == "ALS":
             evdt = _present(model, [v for pi, v in entries if people[pi].is_evdt], f"evdt_{key}")
             target = als_nights if is_weekend_night(*key) else als_days if is_weekend_day(*key) else als_other
@@ -174,12 +203,14 @@ def solve_schedule(
 
     objectives = [
         ("Ambulance shifts with an EMT", sum(coverage)),
-        ("Ambulance hours within caps", sum(amb_hours)),
         ("ALS Friday/Saturday nights with EVDT", sum(als_nights)),
         ("ALS Saturday/Sunday days with EVDT", sum(als_days)),
-        ("Other ALS shifts with EVDT", sum(als_other)),
+        ("Weekend shifts ready for split crew", sum(weekend_ready)),
+        ("Weekend crew seats toward three volunteers", sum(weekend_core)),
         ("Weekend BLS shifts with Utility driver", sum(utility)),
-        ("Ambulance volunteer seats filled", sum(x.values())),
+        ("Other ALS shifts with EVDT", sum(als_other)),
+        ("Weekend volunteer seats filled", sum(weekend_seats)),
+        ("Ambulance hours within caps", sum(amb_hours)),
         ("Campus blocks with a responder", sum(campus_coverage)),
         ("Campus hours within caps", sum(cr_hours)),
     ]
