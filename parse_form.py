@@ -3,7 +3,7 @@ parse_form.py
 =============
 Reads the Google Form CSV export and returns (volunteers, bert_members).
 
-The form (see FORM_GUIDE.md) has one column per date per question grid:
+The form has one column per date per question grid:
   - "Day Shifts ... [Mon 4/27]"      cells contain AM and/or PM
   - "Night Shifts [Mon 4/27]"        cells contain NIGHT
   - "Weekend Day [Sat 5/2]"          cells contain DAY
@@ -19,8 +19,11 @@ Ambulance EMTs' campus availability is inferred from their AM/PM availability
 from __future__ import annotations
 
 import csv
+import io
 import re
+import zipfile
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from models import (
@@ -154,6 +157,8 @@ def _build_column_maps(headers: list[str], block_start: date, block_end: date) -
         if d is None:
             continue
         low = hh.lower()
+        if "wellness wagon" in low:
+            continue
         # Legacy form: one grid per shift type.
         if low.startswith("day shifts"):
             emt_day[i] = d
@@ -161,7 +166,7 @@ def _build_column_maps(headers: list[str], block_start: date, block_end: date) -
             emt_night[i] = d
         elif low.startswith("weekend day"):
             emt_weekend[i] = d
-        # Current form (FORM_GUIDE.md): one grid per week, all shifts as columns.
+        # Current form: labeled ambulance/campus availability grids.
         elif "ambulance availability" in low:
             emt_week[i] = d
         elif "campus response availability" in low or ("availability" in low and "a/b" in low):
@@ -301,31 +306,54 @@ def load_all_responses(
     block_end: date,
     driver_status_overrides: Optional[dict[str, str]] = None,
 ) -> tuple[list[Volunteer], list[BertMember]]:
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        rows = list(csv.reader(f))
+    path = Path(csv_path)
+    if path.suffix.lower() == ".zip":
+        with zipfile.ZipFile(path) as archive:
+            files = [n for n in archive.namelist() if n.lower().endswith(".csv") and not n.startswith("__MACOSX/")]
+            if len(files) != 1:
+                raise ValueError("Response ZIP must contain exactly one CSV")
+            source = archive.read(files[0]).decode("utf-8-sig")
+        rows = list(csv.reader(io.StringIO(source)))
+    else:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
     if not rows:
         raise ValueError("CSV file is empty.")
 
     headers, data_rows = rows[0], rows[1:]
     maps = _build_column_maps(headers, block_start, block_end)
     year = block_start.year
+    if maps["idx_email"] < 0 or maps["idx_role"] < 0:
+        raise ValueError("Response CSV must contain an email and role column")
+    if not any(maps[k] for k in ("emt_day", "emt_night", "emt_weekend", "emt_week", "bert")):
+        raise ValueError("No scheduling columns match the configured block dates")
 
-    # Latest submission per email, split by role.
-    latest_emt: dict[str, tuple[datetime, list[str]]] = {}
-    latest_bert: dict[str, tuple[datetime, list[str]]] = {}
+    # Latest complete submission per person, including changes of role.
+    latest = {}
     for row in data_rows:
         email = _safe(row, maps["idx_email"]).lower()
         if not email:
             continue
         ts = _parse_timestamp(_safe(row, maps["idx_ts"]))
+        if ts == datetime.min:
+            raise ValueError("Response timestamp cannot be parsed; latest submission is ambiguous")
+        if email not in latest or ts >= latest[email][0]:
+            latest[email] = (ts, row)
+    latest_emt: dict[str, tuple[datetime, list[str]]] = {}
+    latest_bert: dict[str, tuple[datetime, list[str]]] = {}
+    for email, (ts, row) in latest.items():
         role = _safe(row, maps["idx_role"])
         bucket = latest_bert if _is_bert_role(role) else latest_emt if _is_emt_role(role) else None
-        if bucket is not None and (email not in bucket or ts > bucket[email][0]):
-            bucket[email] = (ts, row)
+        if bucket is None:
+            raise ValueError(f"Unknown member role: {role!r}")
+        bucket[email] = (ts, row)
 
     driver_status_overrides = {
-        email.lower(): status for email, status in (driver_status_overrides or {}).items()
+        email.strip().lower(): {"EVDT": "EVDT", "AUTH": "Auth", "EMT": "EMT"}.get(str(status).upper())
+        for email, status in (driver_status_overrides or {}).items()
     }
+    if any(status is None for status in driver_status_overrides.values()):
+        raise ValueError("Driver overrides must be EVDT, Auth or EMT")
     volunteers: list[Volunteer] = []
     for email, (_, row) in latest_emt.items():
         blackout_slots, blackout_dates = parse_blackouts(_safe(row, maps["idx_emt_diff"]), year)

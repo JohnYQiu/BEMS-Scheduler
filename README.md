@@ -1,119 +1,171 @@
 # BEMS Scheduler
 
-Shift scheduler for Brown EMS. Takes the availability Google Form's CSV
-export and produces a formatted `.xlsx` schedule for a block, covering:
+Schedules ambulance and Campus Response together from a Google Form CSV or
+single-CSV ZIP. Wellness Wagon scheduling and availability strikes are outside
+this program.
 
-- **Ambulance shifts** — weekday AM (0700–1300) / PM (1300–1900) / NIGHT
-  (1900–0700), weekend DAY (0700–1900) / NIGHT. Driver certifications:
-  EVDT (Rescue 1) > Authorized (Utility 1) > EMT.
-- **Campus Response** — weekday 3h blocks A–D (0700–1900), staffed by BERT
-  members and ambulance EMTs.
+## Run
 
-## Setup
-
-```bash
+```sh
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-```
-
-> Anaconda note: OR-Tools crashes on import under Anaconda Python on macOS
-> (protobuf symbol clash). Use a plain python.org/Homebrew Python for the
-> venv, e.g. `/opt/homebrew/bin/python3.11 -m venv .venv`.
-
-## Usage
-
-1. Export the form responses sheet as CSV (see [FORM_GUIDE.md](FORM_GUIDE.md)
-   for how the form must be structured).
-2. Edit `config.json` (block dates, hour requirements, ALS shifts).
-3. Run:
-
-```bash
 .venv/bin/python main.py
 ```
 
-Output: `schedule_output.xlsx` with five sheets — Schedule, Campus Response,
-Hour Summary, Warnings, Strike List — plus a console report.
+Before each block, edit `config.json`. Set the dates, response file, hour caps,
+and **every active shift's supervisor type** in `shift_providers`. The current
+Block 2 configuration covers September 21–October 18, 2026, with the supplied
+ALS roster and BLS for all remaining shifts. Review these choices for each new
+block; every active shift must explicitly be `"ALS"` or `"BLS"`.
 
-To independently re-check every hard rule against a fresh solve:
-
-```bash
-.venv/bin/python verify_schedule.py
+```json
+"shift_providers": {
+  "2026-09-21:DAY": "ALS",
+  "2026-09-21:NIGHT": "ALS"
+}
 ```
 
-## How scheduling works
+On weekdays, `DAY` sets both AM and PM. To configure different providers,
+replace that DAY entry with separate AM and PM entries. Weekends use DAY
+and NIGHT. Missing, invalid, overlapping, and out-of-block entries stop the
+run. Supplied blackouts remove slots from both services where they overlap.
 
-Both schedules are solved with [CP-SAT](https://developers.google.com/optimization/cp)
-(Google OR-Tools), a constraint solver: every possible (person, shift)
-assignment is a variable, the rules are constraints, and the solver searches
-for the assignment that maximizes a prioritized objective — considering the
-whole block at once instead of filling shifts greedily one at a time.
+Paths resolve relative to the configuration file, so this also works from
+another directory:
 
-**Hard rules (never violated):**
+```sh
+.venv/bin/python main.py /path/to/config.json
+.venv/bin/python main.py config.json --check
+```
 
-- People are only assigned to slots they marked available.
-- Crew caps: weekday AM/PM = 2, NIGHT = 3, big weekend (Fri NIGHT → Sun DAY) = 4.
-- Hour requirement is also a hard maximum — nobody is scheduled above it.
-- Rest: max 12h continuous (AM+PM is allowed), then at least 12h off — a
-  NIGHT excludes all daytime shifts that day and the next; NIGHT→NIGHT is fine.
-- ALS shifts always hold one seat only an EVDT can fill (left open otherwise).
-- Campus blocks never overlap the same person's ambulance shifts.
+`--check` runs the same solve and validation without exporting. A normal run
+validates the exact resulting assignments before writing:
 
-**Priorities (highest first):**
+- `outputs/schedule.xlsx`: Schedule, Campus Response, Hour Summary, Warnings,
+  and Solver sheets.
+- `outputs/master_schedule.csv`: flat Master Schedule rows. Export only;
+  review before importing into another system.
 
-1. Every shift has at least one person.
-2. Everyone reaches their required hours.
-3. An EVDT on every ALS shift; a driver on every night/weekend shift.
-4. Maximize total filled crew slots — with hours capped, this automatically
-   prefers giving people 6h shifts over 12h shifts, spreading coverage.
-5. Spread people out (avoid same-day/back-to-back days) and equalize any
-   unavoidable hour shortfalls.
+Inputs, outputs, and personnel overrides are Git-ignored. The original response
+archive can stay in Downloads; the local Block 2 input is `inputs/block2.csv.zip`.
 
-Anything that still falls short lands on the **Warnings** sheet (unfilled
-shift, ALS without EVDT, crew without a driver, member under hours), so the
-gaps that remain are provably unavoidable given submitted availability —
-they need a human conversation, not a better algorithm.
+## Work rules
 
-## Configuration (`config.json`)
+- Only assign submitted availability. For EMTs, AM availability makes A and B
+  individually eligible for CR; PM makes C and D eligible. Eligibility does not
+  require assigning both blocks. EMT/ERT dual-role members use the EMT quota.
+- Campus-only ERT/BERT members use their explicit A–D selections. They never
+  count as ambulance EMT coverage. Extra campus sections filled by an EMT do
+  not create another person or override the inferred availability.
+- One person per normalized email; the latest complete submission wins across
+  roles. Unreadable timestamps or unknown roles stop parsing rather than silently
+  selecting an older response.
+- Maximum **12 continuous hours across both services**, with **12 hours off**
+  between work periods. Multiple assignments on a day must be contiguous.
+  AM+C, AM+C+D, A+B+PM, and AM+PM are valid. AM+D and A+PM are not.
+- NIGHT excludes daytime ambulance and CR on that date and the next date.
+  Consecutive nights have exactly 12 hours off and are allowed.
+- There is **no preference for spreading or clustering assignments**.
+- The hour requirements are also hard caps: EMT 18 ambulance plus 6 CR hours;
+  campus-only members 9 CR hours. They are independently counted. Insufficient
+  availability leaves a reported shortfall; caps are never exceeded.
+- Volunteer crew caps remain 2 for AM/PM, 3 for normal nights, and 4 for Friday
+  NIGHT, Saturday DAY/NIGHT, and Sunday DAY. Supervisors are supplied separately.
+- `campus_capacity` is a maximum, not required staffing. There is no warning
+  just because a CR block has fewer than two responders.
 
-| Key | Meaning |
-| --- | --- |
-| `block_start` / `block_end` | Block dates, inclusive (ISO `YYYY-MM-DD`). |
-| `form_csv` | Path to the form's CSV export. |
-| `output_xlsx` | Output workbook path. |
-| `master_schedule_export` | Optional flat CSV export for the Master Schedule. Set its `block`, `daynum_start`, and `vehicle` from the target block; F26B1 starts at `0810`. |
-| `hours.ambulance_emt` | Required (= max) ambulance hours per EMT this block. |
-| `hours.campus_emt` / `hours.campus_bert` | Required (= max) campus hours per role. |
-| `campus_responders_per_block` | Staffing target per campus block. |
-| `campus_driver_policy` | `prefer` (default) fills S1 with an available non-driver when necessary and flags it; use `require` only to leave such blocks open. |
-| `driver_status_overrides_file` | Local, Git-ignored JSON file of roster-based corrections keyed by email. It overrides self-reported credentials without publishing personnel data. |
-| `locked_ambulance_assignments_file` | Local, Git-ignored JSON array of chosen ambulance assignments: `{"date":"2026-09-08","shift":"AM","email":"person@brown.edu"}`. |
-| `solver_time_limit_s` | Solver budget per stage (30s is plenty; raise for huge blocks). |
-| `availability_requirements` | Minimum shifts/blocks people must *submit* (drives the Strike List). |
-| `als_shifts` | `"YYYY-MM-DD:DAY"` / `"YYYY-MM-DD:NIGHT"` entries; weekday `DAY` covers AM+PM. |
-| `blackout_periods` | `{start_date, start_shift, end_date, end_shift}` ranges removed from the block. |
+## Supervisors and driving
 
-`master_schedule.csv` has the exact column order used by the Master Schedule:
-`Block, ShiftID, Date, Shift, Vehicle, Seat, Requires, Assigned/Name`.
-It is deliberately a local export only; review it, then paste the rows into the
-Sheet. The scheduler never calls the Google Sheets or Google Calendar APIs.
+Every shift already has a supervisor who can drive the ambulance. An EVDT on
+an ALS shift lets the ALS provider treat the patient in the back during transport.
+An ALS shift therefore reserves one volunteer seat for an EVDT; it stays open
+otherwise, and the missing EVDT is reported. Other EMTs may still be assigned.
 
-For F26B1, `config.json` is set to August 10–September 3, 2026 and a day
-number start of `810`. Populate `als_shifts` from the approved F26B1 ALS list
-before each live run—the historical Spring list was removed rather than reused.
-The parser accepts both the legacy separate-shift grids and the current
-weekly-grid form format, so the availability-format decision does not require
-code changes as long as the documented header phrases are retained.
+On BLS weekends, the supervisor can drive the ambulance and an Auth can drive
+Utility for split crew. EVDT and Auth are equally eligible for that Utility role.
+There is no EVDT bonus just for being a weekend, and no driver preference on
+weekday BLS shifts. A missing Utility volunteer is not a missing ambulance driver.
+EVDTs remain eligible for CR under the same availability and work rules as other EMTs.
 
-## Files
+## Optimization
 
-| File | Role |
-| --- | --- |
-| `main.py` | Pipeline: parse → validate → solve → export. |
-| `models.py` | Shift/block calendar, crew caps, rest rules, people dataclasses. |
-| `parse_form.py` | Google Form CSV → people (handles both form formats, dedup, blackouts). |
-| `validate.py` | Strike list + availability summaries (thresholds from config). |
-| `ambulance_solver.py` | CP-SAT ambulance scheduler. |
-| `campus_solver.py` | CP-SAT campus response scheduler. |
-| `output.py` | xlsx export + console summary. |
-| `verify_schedule.py` | Independent checker for every hard rule. |
-| `FORM_GUIDE.md` | How to build the Google Form so it parses cleanly. |
+The whole block is one CP-SAT model. The stages below preserve the value reached
+by each preceding stage; they do not freeze individual ambulance assignments.
+Campus objectives can still rearrange ambulance assignments while preserving
+the earlier results.
+
+1. Maximize ambulance shifts with at least one EMT alongside the supervisor.
+2. Maximize ambulance hours within the individual caps.
+3. Maximize ALS Friday/Saturday nights with an EVDT.
+4. Maximize ALS Saturday/Sunday days with an EVDT.
+5. Maximize other ALS shifts with an EVDT.
+6. Maximize BLS weekend shifts with a Utility-qualified volunteer (Auth or EVDT).
+7. Maximize filled ambulance volunteer seats.
+8. Maximize campus blocks with at least one responder.
+9. Maximize campus hours within the individual caps.
+
+`solver_time_limit_s` is one total search budget shared across stages. Stages
+with no relevant variables are skipped. Each stage reports its status, attained
+value, upper bound, and time. `OPTIMAL` means that stage was proved optimal
+given earlier attained values. A `FEASIBLE` result can be retained at the time
+limit, but is not a proof of optimality. If a later stage finds no solution in
+its allocation, the last complete feasible schedule is retained and flagged.
+Individual open shifts and shortfalls are never described as inherently unavoidable.
+
+For reproducible runs with the same inputs and pinned dependencies, set
+`solver_workers` to 1 and allow enough time to finish. Multiple workers improve
+search speed but may choose different equally good schedules.
+
+## Master Schedule export
+
+The column order remains `Block, ShiftID, Date, Shift, Vehicle, Seat, Requires,
+Assigned/Name`. The supervisor is not duplicated in volunteer rows.
+
+- ALS ambulance Driver rows use `R1` and require `EVDT`.
+- Weekend Utility Driver rows use `U1` and require `AUTH` (EVDT also qualifies).
+- Other volunteer seats are `CREW`. A crew-only EMT is never labelled a driver.
+- BLS shifts do not reserve a fictitious EVDT ambulance-driver seat. Weekday
+  BLS rows are crew seats. Weekend open capacity may include a Utility opening.
+- CR rows use `CR`, S1 through the configured capacity, and `CREW`; they do
+  not imply that campus-only members are ambulance EMTs or require a driver.
+
+Vehicle and seat IDs now reflect those roles. Regenerate/review the whole export
+when importing; do not assume the previous R1-only Driver IDs still apply.
+`daynum_start` preserves the existing sequential day-number convention, rather
+than switching formats at the start of a month.
+
+## Inputs and local corrections
+
+The parser supports the existing legacy, weekly, shopping-period, and Block 2
+headers. Use bracketed date labels such as `[Mon 9/21]`, an email column
+(`Email Address` or `Username`), the role question, and the usual First/Last Name
+fields. Ambulance cells contain AM/PM/DAY/NIGHT; campus cells contain A/B/C/D.
+Wellness Wagon columns are explicitly ignored.
+
+Existing structured blackout syntax in the difficulties field remains supported:
+`9/25`, `9/25-9/27`, `9/25 NIGHT; 9/28 AM`, or campus block tokens. Separate
+independent entries with semicolons. Arbitrary prose is not a structured rule;
+personnel should review it separately.
+
+Optional `driver_status_overrides.local.json` contains email-to-credential
+corrections, with values EVDT, Auth, or EMT. Optional
+`locked_assignments.local.json` contains assignments to preserve:
+
+```json
+[{"date": "2026-09-21", "shift": "AM", "email": "person@example.com"}]
+```
+
+Locks can use ambulance shift names or individual campus blocks. Unavailable or
+conflicting locks fail clearly; they never override a hard work rule.
+
+## Development
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+`main.py` orchestrates; `configuration.py` loads settings; `models.py` owns
+people and times; `parse_form.py` reads responses; `solver.py` builds the joint
+model; `validation.py` independently checks the resulting intervals and staffing;
+`output.py` formats those validated assignments. Availability strikes are handled
+elsewhere, so the former strike workflow and duplicate checker were removed.

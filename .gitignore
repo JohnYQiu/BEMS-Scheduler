@@ -7,3 +7,7 @@ __pycache__/
 .venv/
 driver_status_overrides.local.json
 locked_ambulance_assignments.local.json
+*.local.json
+inputs/
+outputs/
+master_schedule.csv

@@ -1,205 +1,56 @@
-"""
-main.py
-=======
-Entry point for the Brown EMS scheduling system.
-
-Usage:
-    python main.py [config.json]
-
-Pipeline:
-  1. Parse the Google Form CSV export        (parse_form.py)
-  2. Validate availability, print strike list (validate.py)
-  3. Solve the ambulance schedule             (ambulance_solver.py, CP-SAT)
-  4. Solve the campus response schedule       (campus_solver.py, CP-SAT)
-  5. Export xlsx + print summary              (output.py)
-
-See README.md for the config.json format and FORM_GUIDE.md for how the
-Google Form must be structured for the parser.
-"""
+"""Load responses, solve jointly, validate that result, then export."""
 
 from __future__ import annotations
 
-import json
-import sys
-from datetime import date
+import argparse
 from pathlib import Path
 
-from ambulance_solver import solve_ambulance
-from campus_solver import solve_campus
-from models import block_dates, expand_als_entries, expand_blackout_period
-from output import (
-    collect_warnings,
-    export_master_schedule_csv,
-    export_schedule_xlsx,
-    print_summary,
-    print_warnings,
-)
+from configuration import load_config
+from output import export_master_schedule_csv, export_schedule_xlsx, print_summary
 from parse_form import load_all_responses
-from validate import (
-    AvailabilityRequirements,
-    check_ambulance_requirements,
-    check_bert_requirements,
-    check_total_available_hours,
-    print_availability_summary,
-    print_hours_warnings,
-    print_strike_list,
-)
+from solver import solve_schedule
+from validation import validate_schedule
 
 
-def load_config(path: str) -> dict:
-    if not Path(path).exists():
-        sys.exit(f"ERROR: config not found at '{path}'.")
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def parse_blackout_periods(cfg: dict) -> set:
-    slots = set()
-    for period in cfg.get("blackout_periods", []):
-        try:
-            slots |= expand_blackout_period(
-                date.fromisoformat(period["start_date"]), period["start_shift"],
-                date.fromisoformat(period["end_date"]), period["end_shift"],
-            )
-        except (KeyError, ValueError) as e:
-            print(f"  [WARN] Skipping malformed blackout period {period}: {e}")
-    return slots
-
-
-def load_driver_status_overrides(cfg: dict) -> dict[str, str]:
-    """Load local roster corrections without committing personnel data."""
-    overrides = dict(cfg.get("driver_status_overrides") or {})
-    path = cfg.get("driver_status_overrides_file")
-    if not path or not Path(path).exists():
-        return overrides
-    with open(path, encoding="utf-8") as f:
-        local = json.load(f)
-    if not isinstance(local, dict):
-        raise ValueError(f"driver status overrides in '{path}' must be a JSON object")
-    overrides.update(local)
-    return overrides
-
-
-def load_locked_ambulance_assignments(cfg: dict) -> list[dict]:
-    path = cfg.get("locked_ambulance_assignments_file")
-    if not path or not Path(path).exists():
-        return []
-    with open(path, encoding="utf-8") as f:
-        locks = json.load(f)
-    if not isinstance(locks, list):
-        raise ValueError(f"locked assignments in '{path}' must be a JSON array")
-    return locks
-
-
-def main() -> None:
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
-    print("\n▶  Loading configuration...")
-    cfg = load_config(config_path)
-
-    try:
-        block_start = date.fromisoformat(cfg["block_start"])
-        block_end = date.fromisoformat(cfg["block_end"])
-    except (KeyError, ValueError) as e:
-        sys.exit(f"ERROR: invalid block_start/block_end in config: {e}")
-
-    hours = cfg.get("hours", {})
-    ambulance_required = int(hours.get("ambulance_emt", 12))
-    campus_emt_required = int(hours.get("campus_emt", 3))
-    campus_bert_required = int(hours.get("campus_bert", 6))
-    responders_per_block = int(cfg.get("campus_responders_per_block", 2))
-    require_campus_driver = cfg.get("campus_driver_policy", "prefer") == "require"
-    time_limit_s = float(cfg.get("solver_time_limit_s", 30))
-    reqs = AvailabilityRequirements.from_config(cfg)
-
-    schedule_dates = block_dates(block_start, block_end)
-    als_shifts = expand_als_entries(cfg.get("als_shifts", []), schedule_dates)
-    blackout_slots = parse_blackout_periods(cfg)
-
-    print(f"  Block: {block_start} → {block_end}  ({len(schedule_dates)} days)")
-    print(f"  ALS shift slots: {len(als_shifts)}  |  Blackout slots: {len(blackout_slots)}")
-    print(f"  Required hours — ambulance EMT: {ambulance_required}h, "
-          f"campus EMT: {campus_emt_required}h, campus BERT: {campus_bert_required}h")
-
-    # ── 1. Parse ─────────────────────────────────────────────────────────────
-    form_csv = cfg.get("form_csv", "form_responses.csv")
-    print(f"\n▶  Parsing form responses from '{form_csv}'...")
-    if not Path(form_csv).exists():
-        sys.exit(f"ERROR: form CSV not found at '{form_csv}'.")
-    try:
-        driver_status_overrides = load_driver_status_overrides(cfg)
-        locked_ambulance_assignments = load_locked_ambulance_assignments(cfg)
-    except (OSError, ValueError, json.JSONDecodeError) as e:
-        sys.exit(f"ERROR: invalid driver status overrides: {e}")
+def run(config_path, check_only=False):
+    config = load_config(config_path)
     volunteers, bert_members = load_all_responses(
-        form_csv, block_start, block_end,
-        driver_status_overrides=driver_status_overrides,
-    )
-    if not volunteers:
-        sys.exit("ERROR: no Ambulance EMT volunteers found.")
+        config.form_csv, config.dates[0], config.dates[-1], config.overrides)
+    people = volunteers + bert_members
+    if not people:
+        raise ValueError("No scheduling members found in the response CSV")
+    print(f"Block: {config.dates[0]} to {config.dates[-1]}")
+    print("Solving ambulance and campus response together...")
+    schedule = solve_schedule(
+        people, config.providers, config.campus_keys, config.caps,
+        config.campus_capacity, config.locks, config.time_limit_s, config.workers)
+    errors = validate_schedule(schedule, people, config.providers, config.campus_keys,
+                               config.caps, config.campus_capacity, config.locks)
+    if errors:
+        raise RuntimeError("Schedule failed validation; nothing exported:\n" + "\n".join(errors))
+    print("All hard scheduling rules verified against the resulting assignments.")
+    print_summary(schedule, people, config.providers, config.caps)
+    if not check_only:
+        path = export_schedule_xlsx(schedule, people, config.providers, config.caps,
+                                    config.output_xlsx, config.campus_capacity)
+        print(f"Workbook: {path}")
+        if config.master_csv:
+            path = export_master_schedule_csv(
+                schedule, config.providers, config.dates[0], config.master_csv,
+                config.block, config.daynum_start, config.campus_capacity)
+            print(f"Master Schedule CSV: {path}")
+    return schedule
 
-    # ── 2. Validate ──────────────────────────────────────────────────────────
-    print("\n▶  Validating availability submissions...")
-    emt_violations = check_ambulance_requirements(volunteers, reqs)
-    bert_violations = check_bert_requirements(bert_members, reqs)
-    print_strike_list(emt_violations, "AMBULANCE EMT AVAILABILITY")
-    print_strike_list(bert_violations, "BERT AVAILABILITY")
-    print_hours_warnings(
-        check_total_available_hours(volunteers, ambulance_required), ambulance_required
-    )
-    print_availability_summary(volunteers, schedule_dates, blackout_slots)
 
-    # ── 3. Solve ambulance ───────────────────────────────────────────────────
-    print("▶  Solving ambulance schedule (CP-SAT)...")
-    assignments = solve_ambulance(
-        volunteers, schedule_dates, als_shifts, blackout_slots,
-        locked_assignments=locked_ambulance_assignments,
-        required_hours=ambulance_required, time_limit_s=time_limit_s,
-    )
-
-    # ── 4. Solve campus ──────────────────────────────────────────────────────
-    print("▶  Solving campus response schedule (CP-SAT)...")
-    campus_assignments = solve_campus(
-        volunteers, bert_members, schedule_dates,
-        responders_per_block=responders_per_block,
-        emt_required_hours=campus_emt_required,
-        bert_required_hours=campus_bert_required,
-        require_driver=require_campus_driver,
-        time_limit_s=time_limit_s,
-    )
-
-    # ── 5. Output ────────────────────────────────────────────────────────────
-    print_summary(
-        assignments, campus_assignments, volunteers, bert_members, als_shifts,
-        ambulance_required, campus_emt_required, campus_bert_required, responders_per_block,
-    )
-    warnings = collect_warnings(
-        assignments, als_shifts, volunteers, ambulance_required,
-        campus_assignments, responders_per_block,
-    )
-    print_warnings(warnings)
-    print("▶  Exporting...")
-    export_schedule_xlsx(
-        assignments, campus_assignments, volunteers + bert_members,
-        cfg.get("output_xlsx", cfg.get("output_csv", "schedule_output.xlsx")),
-        als_shifts=als_shifts,
-        violations=emt_violations + bert_violations,
-        ambulance_required=ambulance_required,
-        campus_emt_required=campus_emt_required,
-        campus_bert_required=campus_bert_required,
-        responders_per_block=responders_per_block,
-    )
-    master_export = cfg.get("master_schedule_export", {})
-    if master_export.get("enabled", True):
-        export_master_schedule_csv(
-            assignments,
-            campus_assignments,
-            block_start,
-            output_path=master_export.get("path", "master_schedule.csv"),
-            block=master_export.get("block", "F26B1"),
-            daynum_start=int(master_export.get("daynum_start", 810)),
-            vehicle=master_export.get("vehicle", "R1"),
-        )
-    print("✓  Done.\n")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", nargs="?", default=Path(__file__).with_name("config.json"))
+    parser.add_argument("--check", action="store_true", help="solve and validate without exporting")
+    args = parser.parse_args()
+    try:
+        run(args.config, args.check)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+        parser.exit(1, f"ERROR: {error}\n")
 
 
 if __name__ == "__main__":

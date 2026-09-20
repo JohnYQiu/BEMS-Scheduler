@@ -1,53 +1,81 @@
 {
-  "block_start": "2026-09-08",
-  "block_end": "2026-09-20",
-  "form_csv": "form_responses.csv",
-  "output_xlsx": "schedule_output.xlsx",
+  "block_start": "2026-09-21",
+  "block_end": "2026-10-18",
+  "form_csv": "inputs/block2.csv.zip",
+  "output_xlsx": "outputs/schedule.xlsx",
+  "hours": {
+    "ambulance_emt": 18,
+    "campus_emt": 6,
+    "campus_bert": 9
+  },
+  "campus_capacity": 2,
+  "solver_time_limit_s": 30,
+  "solver_workers": 8,
+  "driver_status_overrides_file": "driver_status_overrides.local.json",
+  "locked_assignments_file": "locked_assignments.local.json",
+  "blackout_periods": [],
   "master_schedule_export": {
     "enabled": true,
-    "path": "master_schedule.csv",
-    "block": "F26B1",
-    "daynum_start": 908,
-    "vehicle": "R1"
+    "path": "outputs/master_schedule.csv",
+    "block": "F26B2",
+    "daynum_start": 921
   },
-  "blackout_periods": [],
-
-  "hours": {
-    "ambulance_emt": 12,
-    "campus_emt": 3,
-    "campus_bert": 3
-  },
-
-  "campus_responders_per_block": 2,
-  "campus_driver_policy": "prefer",
-  "driver_status_overrides_file": "driver_status_overrides.local.json",
-  "locked_ambulance_assignments_file": "locked_ambulance_assignments.local.json",
-  "solver_time_limit_s": 30,
-
-  "availability_requirements": {
-    "ambulance": {
-      "min_weekday_am_shifts": 1,
-      "min_weekday_pm_shifts": 1,
-      "min_weekday_night_shifts": 1,
-      "min_weekend_day_shifts": 1,
-      "min_weekend_night_shifts": 1
-    },
-    "bert": {
-      "min_ab_blocks": 2,
-      "min_cd_blocks": 2
-    }
-  },
-
-  "als_shifts": [
-    "2026-09-08:NIGHT",
-    "2026-09-10:DAY",
-    "2026-09-10:NIGHT",
-    "2026-09-14:DAY",
-    "2026-09-14:NIGHT",
-    "2026-09-15:DAY",
-    "2026-09-15:NIGHT",
-    "2026-09-17:DAY",
-    "2026-09-18:NIGHT",
-    "2026-09-20:NIGHT"
-  ]
+  "shift_providers": {
+    "2026-09-21:DAY": "ALS",
+    "2026-09-21:NIGHT": "ALS",
+    "2026-09-22:DAY": "ALS",
+    "2026-09-22:NIGHT": "ALS",
+    "2026-09-23:DAY": "BLS",
+    "2026-09-23:NIGHT": "ALS",
+    "2026-09-24:DAY": "ALS",
+    "2026-09-24:NIGHT": "ALS",
+    "2026-09-25:DAY": "BLS",
+    "2026-09-25:NIGHT": "BLS",
+    "2026-09-26:DAY": "ALS",
+    "2026-09-26:NIGHT": "BLS",
+    "2026-09-27:DAY": "BLS",
+    "2026-09-27:NIGHT": "BLS",
+    "2026-09-28:DAY": "BLS",
+    "2026-09-28:NIGHT": "BLS",
+    "2026-09-29:DAY": "BLS",
+    "2026-09-29:NIGHT": "ALS",
+    "2026-09-30:DAY": "BLS",
+    "2026-09-30:NIGHT": "BLS",
+    "2026-10-01:DAY": "ALS",
+    "2026-10-01:NIGHT": "ALS",
+    "2026-10-02:DAY": "BLS",
+    "2026-10-02:NIGHT": "BLS",
+    "2026-10-03:DAY": "BLS",
+    "2026-10-03:NIGHT": "BLS",
+    "2026-10-04:DAY": "ALS",
+    "2026-10-04:NIGHT": "ALS",
+    "2026-10-05:DAY": "ALS",
+    "2026-10-05:NIGHT": "ALS",
+    "2026-10-06:DAY": "BLS",
+    "2026-10-06:NIGHT": "ALS",
+    "2026-10-07:DAY": "BLS",
+    "2026-10-07:NIGHT": "ALS",
+    "2026-10-08:DAY": "ALS",
+    "2026-10-08:NIGHT": "BLS",
+    "2026-10-09:DAY": "BLS",
+    "2026-10-09:NIGHT": "BLS",
+    "2026-10-10:DAY": "BLS",
+    "2026-10-10:NIGHT": "BLS",
+    "2026-10-11:DAY": "BLS",
+    "2026-10-11:NIGHT": "BLS",
+    "2026-10-12:DAY": "ALS",
+    "2026-10-12:NIGHT": "ALS",
+    "2026-10-13:DAY": "BLS",
+    "2026-10-13:NIGHT": "ALS",
+    "2026-10-14:DAY": "BLS",
+    "2026-10-14:NIGHT": "BLS",
+    "2026-10-15:DAY": "ALS",
+    "2026-10-15:NIGHT": "ALS",
+    "2026-10-16:DAY": "BLS",
+    "2026-10-16:NIGHT": "BLS",
+    "2026-10-17:DAY": "ALS",
+    "2026-10-17:NIGHT": "ALS",
+    "2026-10-18:DAY": "BLS",
+    "2026-10-18:NIGHT": "BLS"
+  }
 }

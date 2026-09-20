@@ -9,13 +9,14 @@ Sheets:
   3. Hour Summary    — per-person totals (ambulance + campus) vs requirements
   4. Warnings        — unfilled shifts, ALS without EVDT, night/weekend crews
                        without a driver, under-hours volunteers
-  5. Strike List     — members whose submitted availability missed the minimums
+  5. Solver          — objective stages, attained values, bounds and status
 """
 
 from __future__ import annotations
 
 import csv
 from datetime import date, timedelta
+from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -23,8 +24,9 @@ from openpyxl.utils import get_column_letter
 
 from models import (
     CAMPUS_BLOCK_TIMES,
+    HourCaps,
+    Schedule,
     SHIFT_TIMES,
-    ShiftKey,
     Volunteer,
     crew_cap,
     is_big_weekend,
@@ -189,348 +191,168 @@ def _build_campus_sheet(ws, campus_assignments, responders_per_block: int):
     _weekly_grid(ws, campus_assignments, sections, slot_rows, cell_for)
 
 
-# ── Sheet 3: Hour summary ────────────────────────────────────────────────────
 
-def _fmt_keys(keys) -> str:
+def _fmt_keys(keys):
     return "; ".join(f"{d.month}/{d.day} {s}" for d, s in sorted(keys))
 
 
-def _build_summary_sheet(ws, people, ambulance_required, campus_emt_required, campus_bert_required):
+def _build_summary_sheet(ws, people, caps):
     ws.title = "Hour Summary"
     ws.freeze_panes = "A2"
-    headers = ["Name", "Email", "Role", "Certification", "Ambulance Hours", "Ambulance Shifts",
-               "Campus Hours", "Campus Blocks", "Ambulance Status", "Campus Status"]
-    widths = [28, 32, 8, 13, 14, 44, 12, 30, 16, 16]
-    _header_row(ws, 1, headers, widths)
-
-    def sort_key(p):
-        return (-getattr(p, "assigned_hours", 0), -p.campus_assigned_hours, p.full_name)
-
-    for i, p in enumerate(sorted(people, key=sort_key), 2):
-        is_bert = not isinstance(p, Volunteer)
-        amb = 0 if is_bert else p.assigned_hours
-        campus = p.campus_assigned_hours
-        campus_required = campus_bert_required if is_bert else campus_emt_required
-        amb_under = (not is_bert) and amb < ambulance_required
-        campus_under = campus < campus_required
-        amb_status = "—" if is_bert else (f"⚠ {amb}/{ambulance_required}h" if amb_under else "OK")
-        campus_status = f"⚠ {campus}/{campus_required}h" if campus_under else "OK"
-        vals = [
-            p.full_name, p.email, "BERT" if is_bert else "AMB", p.certification,
-            "—" if is_bert else amb,
-            "—" if is_bert else _fmt_keys(p.assigned),
-            campus, _fmt_keys(p.campus_assigned),
-            amb_status, campus_status,
-        ]
-        bg = C_ALT_ROW if i % 2 == 0 else C_EMT_BG
-        for col, val in enumerate(vals, 1):
-            c = ws.cell(row=i, column=col, value=val)
-            c.fill = _fill(bg)
-            under = (col == 9 and amb_under) or (col == 10 and campus_under)
-            c.font = _font(bold=under, color=C_UNDER if under else "000000")
-            c.alignment = _align(h="center" if col in (3, 4, 5, 7, 9, 10) else "left",
-                                 wrap=col in (6, 8))
-            c.border = BORDER
+    _header_row(ws, 1, ["Name", "Email", "Role", "Certification", "Ambulance Hours",
+                       "Ambulance Shifts", "Campus Hours", "Campus Blocks",
+                       "Ambulance Shortfall", "Campus Shortfall"],
+                [28, 32, 10, 14, 18, 44, 14, 44, 20, 20])
+    for row, p in enumerate(sorted(people, key=lambda p: p.full_name), 2):
+        emt = isinstance(p, Volunteer)
+        ambulance = p.assigned_hours if emt else 0
+        values = [p.full_name, p.email, "EMT" if emt else "ERT/BERT", p.certification,
+                  ambulance if emt else "—", _fmt_keys(p.assigned) if emt else "—",
+                  p.campus_assigned_hours, _fmt_keys(p.campus_assigned),
+                  caps.ambulance - ambulance if emt else "—",
+                  caps.campus_for(p) - p.campus_assigned_hours]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row, col, value)
+            cell.font = _font()
+            cell.fill = _fill(C_ALT_ROW if row % 2 == 0 else C_EMT_BG)
+            cell.alignment = _align(wrap=col in (6, 8))
+            cell.border = BORDER
 
 
-# ── Sheet 4: Warnings ────────────────────────────────────────────────────────
-
-def collect_warnings(
-    assignments,
-    als_shifts,
-    volunteers,
-    ambulance_required,
-    campus_assignments=None,
-    responders_per_block: int = 2,
-) -> list[tuple]:
-    """[(type, date, shift, details)] for everything worth a human look."""
+def collect_warnings(schedule, providers, people, caps):
+    """Report actual unmet needs, never a fictitious missing BLS truck driver."""
     issues = []
-    for key in sorted(assignments):
-        d, s = key
-        people = assignments[key]
-        if not people:
-            issues.append(("UNFILLED SHIFT", d, s, "No volunteers assigned"))
-            continue
-        if key in als_shifts and not any(v.is_evdt for v in people):
-            issues.append(("ALS — NO EVDT", d, s,
-                           f"Assigned: {', '.join(v.full_name for v in people)}"))
-        needs_driver = s == "NIGHT" or is_big_weekend(d, s)
-        if needs_driver and not any(v.is_driver for v in people):
-            issues.append(("NO DRIVER", d, s, "No EVDT or Auth on crew"))
-    for v in sorted(volunteers, key=lambda v: v.full_name):
-        if v.assigned_hours < ambulance_required:
-            issues.append(("UNDER HOURS", None, "",
-                           f"{v.full_name}: {v.assigned_hours}/{ambulance_required}h ambulance"))
-    if campus_assignments is not None:
-        for (d, block), people in sorted(campus_assignments.items()):
-            if not people:
-                issues.append(("CAMPUS — OPEN BLOCK", d, block,
-                               "No responder available"))
-            elif not any(getattr(p, "is_driver", False) for p in people):
-                issues.append(("CAMPUS — DRIVER EXCEPTION", d, block,
-                               "S1 filled without a driver-eligible responder: "
-                               + ", ".join(p.full_name for p in people)))
-            if people and len(people) < responders_per_block:
-                issues.append(("CAMPUS — OPEN SEAT", d, block,
-                               f"{len(people)}/{responders_per_block} responders assigned"))
+    for key, crew in schedule.ambulance.items():
+        d, kind = key
+        if not crew:
+            issues.append(("NO AMBULANCE EMT", d, kind, "Supervisor is supplied separately"))
+        if providers[key] == "ALS" and not any(p.is_evdt for p in crew):
+            issues.append(("ALS — NO EVDT", d, kind,
+                           "No assigned EVDT to drive while the ALS provider treats during transport"))
+        if providers[key] == "BLS" and is_big_weekend(*key) and crew and not any(p.is_driver for p in crew):
+            issues.append(("NO UTILITY DRIVER", d, kind,
+                           "No assigned Utility-qualified volunteer for split crew; supervisor can drive ambulance"))
+    for p in sorted(people, key=lambda p: p.full_name):
+        if isinstance(p, Volunteer) and p.assigned_hours < caps.ambulance:
+            issues.append(("AMBULANCE UNDER HOURS", None, "",
+                           f"{p.full_name}: {p.assigned_hours}/{caps.ambulance}h"))
+        if p.campus_assigned_hours < caps.campus_for(p):
+            issues.append(("CAMPUS UNDER HOURS", None, "",
+                           f"{p.full_name}: {p.campus_assigned_hours}/{caps.campus_for(p)}h"))
+    for stage in schedule.stages:
+        if stage.status != "OPTIMAL":
+            issues.append(("SOLVER LIMIT", None, "", f"{stage.name}: {stage.status}; optimality not proven"))
     return issues
 
 
 def _build_warnings_sheet(ws, issues):
     ws.title = "Warnings"
-    headers = ["Type", "Date", "Day", "Shift", "Details"]
-    widths = [22, 13, 12, 8, 50]
-    _header_row(ws, 1, headers, widths)
-
+    _header_row(ws, 1, ["Type", "Date", "Day", "Shift", "Details"], [28, 13, 12, 10, 85])
     if not issues:
-        c = ws.cell(row=2, column=1, value="No warnings — all shifts adequately staffed.")
-        c.font = _font(bold=True, color="1E7E34")
-        return
-
-    for i, (type_, d, shift_type, detail) in enumerate(issues, 2):
-        bg = "FFF0F0" if i % 2 == 0 else C_WARN_BG
-        vals = [type_, d.isoformat() if d else "", d.strftime("%A") if d else "", shift_type, detail]
-        for col, val in enumerate(vals, 1):
-            c = ws.cell(row=i, column=col, value=val)
-            c.fill = _fill(bg)
-            c.font = _font(bold=(col == 1), color=C_UNDER if col == 1 else "000000")
-            c.alignment = _align(h="center" if col in (2, 3, 4) else "left")
-            c.border = BORDER
+        ws.cell(2, 1, "No coverage, qualification or hour shortfalls reported.")
+    for row, (kind, d, shift, detail) in enumerate(issues, 2):
+        for col, value in enumerate([kind, d.isoformat() if d else "",
+                                     d.strftime("%A") if d else "", shift, detail], 1):
+            cell = ws.cell(row, col, value)
+            cell.font = _font(bold=col == 1)
+            cell.fill = _fill(C_WARN_BG)
+            cell.alignment = _align(wrap=True)
 
 
-# ── Sheet 5: Strike list ─────────────────────────────────────────────────────
-
-def _build_strike_list_sheet(ws, violations):
-    ws.title = "Strike List"
-    ws.freeze_panes = "A2"
-    headers = ["Name", "Email", "Certification", "Missing Requirements"]
-    widths = [28, 32, 14, 50]
-    _header_row(ws, 1, headers, widths)
-
-    if not violations:
-        c = ws.cell(row=2, column=1, value="✓ Everyone met the minimum availability requirements.")
-        c.font = _font(bold=True, color="1E7E34")
-        return
-
-    for i, item in enumerate(violations, 2):
-        v = item["volunteer"]
-        bg = C_ALT_ROW if i % 2 == 0 else C_EMT_BG
-        vals = [v.full_name, v.email, v.certification, ", ".join(item["missing"])]
-        for col, val in enumerate(vals, 1):
-            c = ws.cell(row=i, column=col, value=val)
-            c.fill = _fill(bg)
-            c.font = _font(bold=(col == 1))
-            c.alignment = _align(h="center" if col == 3 else "left", wrap=(col == 4))
-            c.border = BORDER
-
-
-# ── Entry points ─────────────────────────────────────────────────────────────
-
-def export_schedule_xlsx(
-    assignments: dict[ShiftKey, list],
-    campus_assignments: dict[ShiftKey, list],
-    people: list,
-    output_path: str,
-    als_shifts: set[ShiftKey],
-    violations: list[dict],
-    ambulance_required: int,
-    campus_emt_required: int,
-    campus_bert_required: int,
-    responders_per_block: int = 2,
-) -> str:
-    if not output_path.endswith(".xlsx"):
-        output_path = output_path.rsplit(".", 1)[0] + ".xlsx"
-
-    volunteers = [p for p in people if isinstance(p, Volunteer)]
-    issues = collect_warnings(
-        assignments, als_shifts, volunteers, ambulance_required,
-        campus_assignments, responders_per_block,
-    )
-
+def export_schedule_xlsx(schedule: Schedule, people, providers, caps: HourCaps,
+                         output_path, campus_capacity=2):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
-    _build_schedule_sheet(wb.active, assignments)
-    _build_campus_sheet(wb.create_sheet(), campus_assignments, responders_per_block)
-    _build_summary_sheet(wb.create_sheet(), people, ambulance_required,
-                         campus_emt_required, campus_bert_required)
-    _build_warnings_sheet(wb.create_sheet(), issues)
-    _build_strike_list_sheet(wb.create_sheet(), violations)
+    _build_schedule_sheet(wb.active, schedule.ambulance)
+    _build_campus_sheet(wb.create_sheet(), schedule.campus, campus_capacity)
+    _build_summary_sheet(wb.create_sheet(), people, caps)
+    _build_warnings_sheet(wb.create_sheet(), collect_warnings(schedule, providers, people, caps))
+    ws = wb.create_sheet("Solver")
+    _header_row(ws, 1, ["Priority", "Objective", "Status", "Achieved", "Upper Bound", "Seconds"],
+                [10, 52, 18, 14, 16, 12])
+    for row, stage in enumerate(schedule.stages, 2):
+        for col, value in enumerate([row - 1, stage.name, stage.status, stage.value,
+                                     stage.bound, round(stage.seconds, 3)], 1):
+            ws.cell(row, col, value)
+    row = len(schedule.stages) + 3
+    ws.cell(row, 1, "Each stage preserves earlier attained values. FEASIBLE is not proof of an optimum.")
     wb.save(output_path)
-    print(f"  Schedule exported -> {output_path}")
-    return output_path
+    return str(output_path)
 
 
-def print_summary(
-    assignments: dict[ShiftKey, list],
-    campus_assignments: dict[ShiftKey, list],
-    volunteers: list[Volunteer],
-    bert_members: list,
-    als_shifts: set[ShiftKey],
-    ambulance_required: int,
-    campus_emt_required: int,
-    campus_bert_required: int,
-    responders_per_block: int = 2,
-) -> None:
-    total = len(assignments)
-    unfilled = sum(1 for p in assignments.values() if not p)
-    filled_slots = sum(len(p) for p in assignments.values())
-    als_no_evdt = sum(
-        1 for k, p in assignments.items() if k in als_shifts and not any(v.is_evdt for v in p)
-    )
-    no_driver = sum(
-        1 for (d, s), p in assignments.items()
-        if (s == "NIGHT" or is_big_weekend(d, s)) and not any(v.is_driver for v in p)
-    )
-    under = sum(1 for v in volunteers if v.assigned_hours < ambulance_required)
+def print_summary(schedule, people, providers, caps):
+    print("\nSchedule summary")
+    print(f"  Ambulance shifts with an EMT: {sum(bool(p) for p in schedule.ambulance.values())}/{len(schedule.ambulance)}")
+    print(f"  Ambulance volunteer seats: {sum(map(len, schedule.ambulance.values()))}")
+    print(f"  Campus blocks with a responder: {sum(bool(p) for p in schedule.campus.values())}/{len(schedule.campus)} (no required minimum)")
+    for stage in schedule.stages:
+        print(f"  {stage.name}: {stage.value}, {stage.status}, bound {stage.bound}, {stage.seconds:.2f}s")
+    for kind, d, shift, details in collect_warnings(schedule, providers, people, caps):
+        where = f"{d} {shift}: " if d else ""
+        print(f"  {kind}: {where}{details}")
 
-    c_total = len(campus_assignments)
-    c_unfilled = sum(1 for p in campus_assignments.values() if not p)
-    c_full = sum(1 for p in campus_assignments.values() if len(p) >= responders_per_block)
-    c_driver_exceptions = sum(
-        1 for p in campus_assignments.values()
-        if p and not any(getattr(v, "is_driver", False) for v in p)
-    )
-    emt_campus_under = sum(1 for v in volunteers if v.campus_assigned_hours < campus_emt_required)
-    bert_under = sum(1 for b in bert_members if b.campus_assigned_hours < campus_bert_required)
-
-    print("\n" + "=" * 55)
-    print("SCHEDULE SUMMARY")
-    print("=" * 55)
-    print(f"  Ambulance shifts:            {total}")
-    print(f"    Unfilled:                  {unfilled}" + (" ⚠" if unfilled else " ✓"))
-    print(f"    Filled crew slots:         {filled_slots}")
-    print(f"    ALS without EVDT:          {als_no_evdt}" + (" ⚠" if als_no_evdt else " ✓"))
-    print(f"    Night/weekend w/o driver:  {no_driver}" + (" ⚠" if no_driver else " ✓"))
-    print(f"    EMTs under {ambulance_required}h:             {under}" + (" ⚠" if under else " ✓"))
-    print(f"  Campus blocks:               {c_total}")
-    print(f"    Unfilled:                  {c_unfilled}" + (" ⚠" if c_unfilled else " ✓"))
-    print(f"    Fully staffed (={responders_per_block}):        {c_full}")
-    print(f"    Driver exceptions:        {c_driver_exceptions}" + (" ⚠" if c_driver_exceptions else " ✓"))
-    print(f"    EMTs under {campus_emt_required}h campus:       {emt_campus_under}" + (" ⚠" if emt_campus_under else " ✓"))
-    print(f"    BERT under {campus_bert_required}h campus:       {bert_under}" + (" ⚠" if bert_under else " ✓"))
-    print()
-
-
-def print_warnings(issues: list[tuple]) -> None:
-    print("=" * 55)
-    print("WARNINGS")
-    print("=" * 55)
-    if not issues:
-        print("  No warnings.")
-    for type_, d, shift_type, detail in issues:
-        where = f"{d.isoformat()} ({d.strftime('%a')}) {shift_type}" if d else detail
-        extra = f" — {detail}" if d and detail else ""
-        print(f"  ⚠  {type_}: {where}{extra}")
-    print()
-
-
-# ── Master Schedule CSV ─────────────────────────────────────────────────────
 
 MASTER_SCHEDULE_HEADER = [
     "Block", "ShiftID", "Date", "Shift", "Vehicle", "Seat", "Requires", "Assigned/Name",
 ]
 
 
-def _date_for_master_schedule(d: date) -> str:
-    """Portable M/D/YY formatting (strftime %-m is not portable to Windows)."""
-    return f"{d.month}/{d.day}/{d:%y}"
+def _ambulance_seats(key, people, provider):
+    """Vehicle-specific volunteer seats; supervisors are supplied separately.
+
+    ALS reserves an R1/EVDT seat. On weekends a volunteer may drive U1; Auth
+    and EVDT both qualify. BLS never fabricates an R1 driver shortage, and no
+    crew-only EMT is labelled a driver to make the export fit.
+    """
+    remaining = sorted(people, key=lambda p: p.full_name)
+    seats = []
+    cap = crew_cap(*key)
+    if provider == "ALS":
+        driver = next((p for p in remaining if p.is_evdt), None)
+        seats.append(("R1", "Driver", "EVDT", driver))
+        if driver is not None:
+            remaining.remove(driver)
+    if is_big_weekend(*key):
+        driver = next((p for p in remaining if p.is_driver), None)
+        if driver is not None or len(seats) + len(remaining) < cap:
+            seats.append(("U1", "Driver", "AUTH", driver))
+            if driver is not None:
+                remaining.remove(driver)
+    for p in remaining:
+        seats.append(("R1", f"C{len(seats) + 1}", "CREW", p))
+    while len(seats) < cap:
+        seats.append(("R1", f"C{len(seats) + 1}", "CREW", None))
+    if len(seats) > cap:
+        raise ValueError(f"Export would exceed capacity for {key}")
+    return seats
 
 
-def _day_number(d: date, block_start: date, daynum_start: int) -> str:
-    return f"{daynum_start + (d - block_start).days:04d}"
-
-
-def _ambulance_master_rows(assignments, block_start, block, daynum_start, vehicle):
+def export_master_schedule_csv(schedule, providers, block_start, output_path,
+                               block, daynum_start, campus_capacity=2):
     rows = []
-    for (d, shift), people in sorted(assignments.items()):
-        daynum = _day_number(d, block_start, daynum_start)
-        cap = crew_cap(d, shift)
 
-        # EVDT is the preferred Driver seat. If there is no EVDT and the shift
-        # still has an open crew seat, keep Driver open for a later EVDT pickup
-        # and place any AUTH member into C2/C3/C4 instead. Once the shift is
-        # otherwise full, an AUTH member may move into Driver so the crew fits.
-        evdt_driver = next((p for p in people if getattr(p, "is_evdt", False)), None)
-        auth_driver = next(
-            (p for p in people if getattr(p, "is_driver", False) and not getattr(p, "is_evdt", False)),
-            None,
-        )
-        shift_full = len(people) >= cap
+    def row(key, vehicle, seat, requires, person):
+        d, kind = key
+        daynum = daynum_start + (d - block_start).days
+        suffix = requires if seat == "Driver" else seat
+        shift_id = f"{block}-{daynum:04d}-{kind}-{vehicle}-{suffix}"
+        return [block, shift_id, f"{d.month}/{d.day}/{d:%y}", kind, vehicle,
+                seat, requires, person.full_name if person else ""]
 
-        primary_driver = evdt_driver
-        driver_exception = False
-        if primary_driver is None and shift_full:
-            if auth_driver is not None:
-                primary_driver = auth_driver
-            elif people:
-                # Final fallback: only use a crew-only EMT in Driver when the
-                # shift is otherwise full and there is no driver-qualified EMT.
-                primary_driver = people[0]
-                driver_exception = True
-
-        crew_people = [p for p in people if p is not primary_driver]
-        # When Driver is intentionally left open, put AUTH-qualified members at
-        # the front of the crew rows. This yields AUTH in C2 and moves existing
-        # crew to C3/C4, preserving the EVDT opening.
-        if primary_driver is None:
-            crew_people = sorted(
-                crew_people,
-                key=lambda p: (
-                    0 if getattr(p, "is_driver", False) else 1,
-                    p.full_name,
-                ),
-            )
-
-        seats = []
-        if primary_driver is not None:
-            if driver_exception:
-                seats.append(("Driver", "CREW", "DRVX", primary_driver))
-            else:
-                driver_kind = "EVDT" if primary_driver.is_evdt else "AUTH"
-                seats.append(("Driver", driver_kind, driver_kind, primary_driver))
-        else:
-            seats.append(("Driver", "EVDT", "EVDT", None))
-
-        for i, person in enumerate(crew_people, start=2):
-            seats.append((f"C{i}", "CREW", f"C{i}", person))
-        while len(seats) < cap:
-            number = len(seats) + 1
-            seats.append((f"C{number}", "CREW", f"C{number}", None))
-        for seat, requires, suffix, person in seats:
-            shift_id = f"{block}-{daynum}-{shift}-{vehicle}-{suffix}"
-            rows.append([block, shift_id, _date_for_master_schedule(d), shift,
-                         vehicle, seat, requires, person.full_name if person else ""])
-    return rows
-
-
-def _campus_master_rows(campus_assignments, block_start, block, daynum_start):
-    rows = []
-    for (d, campus_block), people in sorted(campus_assignments.items()):
-        daynum = _day_number(d, block_start, daynum_start)
-        ordered = sorted(people, key=lambda p: (not getattr(p, "is_driver", False), p.full_name))
-        for i in range(1, 3):
-            person = ordered[i - 1] if i <= len(ordered) else None
-            seat = f"S{i}"
-            shift_id = f"{block}-{daynum}-{campus_block}-CR-{seat}"
-            rows.append([block, shift_id, _date_for_master_schedule(d), campus_block,
-                         "CR", seat, "AUTH" if seat == "S1" else "CREW", person.full_name if person else ""])
-    return rows
-
-
-def export_master_schedule_csv(
-    assignments,
-    campus_assignments,
-    block_start: date,
-    output_path: str = "master_schedule.csv",
-    block: str = "F26B1",
-    daynum_start: int = 810,
-    vehicle: str = "R1",
-) -> str:
-    """Write flat A:H rows that can be pasted into Master Schedule row 2."""
-    rows = _ambulance_master_rows(assignments, block_start, block, daynum_start, vehicle)
-    rows += _campus_master_rows(campus_assignments, block_start, block, daynum_start)
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
+    for key, people in sorted(schedule.ambulance.items()):
+        for vehicle, seat, requires, person in _ambulance_seats(key, people, providers[key]):
+            rows.append(row(key, vehicle, seat, requires, person))
+    for key, people in sorted(schedule.campus.items()):
+        ordered = sorted(people, key=lambda p: p.full_name)
+        if len(ordered) > campus_capacity:
+            raise ValueError(f"Export would drop campus responders for {key}")
+        for i in range(campus_capacity):
+            rows.append(row(key, "CR", f"S{i + 1}", "CREW", ordered[i] if i < len(ordered) else None))
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(MASTER_SCHEDULE_HEADER)
         writer.writerows(rows)
-    print(f"  Master Schedule CSV exported -> {output_path} ({len(rows)} rows)")
-    return output_path
+    return str(output_path)
