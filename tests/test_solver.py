@@ -6,6 +6,7 @@ from ortools.sat.python import cp_model
 
 from models import BertMember, HourCaps, LockedAssignment, Volunteer, is_big_weekend, weekend_priority
 from solver import _optimize, solve_schedule
+from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS
 from validation import validate_schedule
 
 D = date(2026, 9, 21)
@@ -29,6 +30,30 @@ class SchedulingTests(unittest.TestCase):
         self.assertTrue(all(s.status == "OPTIMAL" for s in result.stages))
         return result
 
+    def test_default_priority_stages_and_configured_reordering(self):
+        ambulance, campus = (D, 'AM'), (D, 'A')
+        providers = {ambulance: 'BLS'}
+        p = emt(ambulance={ambulance}, campus={campus})
+        default = solve_schedule([p], providers, [campus], HourCaps(6, 3, 9),
+                                 2, [], 5, 1)
+        expected = [OBJECTIVE_LABELS[id] for id in DEFAULT_OBJECTIVE_ORDER]
+        self.assertEqual([stage.name for stage in default.stages],
+                         [name for name in expected if name in {s.name for s in default.stages}])
+        self.assertEqual(p.assigned, [ambulance])
+        self.assertEqual(validate_schedule(default, [p], providers, [campus],
+                                           HourCaps(6, 3, 9), 2), [])
+        reordered = ('campus_coverage',) + tuple(
+            id for id in DEFAULT_OBJECTIVE_ORDER if id != 'campus_coverage')
+        changed = solve_schedule([p], providers, [campus], HourCaps(6, 3, 9),
+                                 2, [], 5, 1, objective_order=reordered)
+        self.assertEqual(changed.stages[0].name, OBJECTIVE_LABELS['campus_coverage'])
+        self.assertEqual(p.campus_assigned, [campus])
+        self.assertEqual(p.assigned, [])
+        self.assertEqual(validate_schedule(changed, [p], providers, [campus],
+                                           HourCaps(6, 3, 9), 2), [])
+        with self.assertRaisesRegex(ValueError, 'exactly once'):
+            solve_schedule([p], providers, [campus], objective_order=['campus_coverage'])
+
     def test_wellness_is_lower_priority_than_ambulance_hours(self):
         ambulance, wellness = (D, 'AM'), (D, 'WAM')
         p = emt(ambulance={ambulance})
@@ -36,6 +61,23 @@ class SchedulingTests(unittest.TestCase):
         result = self.solve([p], {ambulance: 'BLS'}, caps=HourCaps(6, 0, 9), wellness={wellness})
         self.assertEqual(p.assigned, [ambulance])
         self.assertEqual(result.wellness[wellness], [])
+
+    def test_supported_weekly_wellness_rule_changes_limit_without_changing_default(self):
+        first, second = (D, 'WAM'), (D + timedelta(days=2), 'WAM')
+        p = emt()
+        p.wellness_available = {first, second}
+        default = solve_schedule([p], {}, [], wellness_keys=[first, second],
+                                 time_limit_s=5, workers=1)
+        self.assertEqual(sum(bool(default.wellness[k]) for k in (first, second)), 1)
+        configured = solve_schedule([p], {}, [], wellness_keys=[first, second],
+                                    time_limit_s=5, workers=1,
+                                    wellness_shifts_per_week=2)
+        self.assertEqual(sum(bool(configured.wellness[k]) for k in (first, second)), 2)
+        self.assertEqual(validate_schedule(configured, [p], {}, [], HourCaps(), 2,
+                                           wellness_keys=[first, second], wellness_shifts_per_week=2), [])
+        self.assertTrue(any('more than 1 Wellness' in e for e in
+                            validate_schedule(configured, [p], {}, [], HourCaps(), 2,
+                                              wellness_keys=[first, second])))
 
     def test_wellness_is_limited_to_one_shift_per_week(self):
         first, second = (D, 'WAM'), (D + timedelta(days=1), 'WPM')
@@ -206,6 +248,17 @@ class SchedulingTests(unittest.TestCase):
         result = self.solve([p], keys, caps=HourCaps(12, 0, 9))
         self.assertEqual(set(p.assigned), {(D, 'AM'), (D, 'PM')})
         self.assertFalse(result.ambulance[(friday, 'NIGHT')])
+
+    def test_evdt_goes_to_als_when_crew_can_cover_bls(self):
+        bls, als = (D, 'AM'), (D, 'PM')
+        evdt = emt('Driver', 'EVDT', {bls, als})
+        crew = emt('Crew', 'EMT', {bls, als})
+        result = self.solve([evdt, crew], {bls: 'BLS', als: 'ALS'},
+                            caps=HourCaps(6, 0, 9))
+        self.assertEqual(evdt.assigned, [als])
+        self.assertEqual(crew.assigned, [bls])
+        self.assertEqual(len(result.ambulance[bls]), 1)
+        self.assertEqual(len(result.ambulance[als]), 1)
 
     def test_als_weekend_night_has_priority_over_weekend_day(self):
         friday, saturday = D + timedelta(days=4), D + timedelta(days=5)

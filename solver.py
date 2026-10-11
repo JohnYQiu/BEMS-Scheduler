@@ -13,6 +13,7 @@ from models import (
     LockedAssignment, Schedule, ShiftKey, SolveStage, Volunteer,
     WEEKEND_PRIORITY_LABELS, ambulance_capacity, weekend_priority,
 )
+from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, validate_objective_order
 
 
 def _present(model, variables, name):
@@ -90,13 +91,19 @@ def solve_schedule(
     workers: int = 8,
     wellness_keys: list[ShiftKey] | None = None,
     wellness_capacity: int = 1,
+    objective_order: list[str] | tuple[str, ...] | None = None,
+    wellness_shifts_per_week: int = 1,
 ) -> Schedule:
+    objective_order = validate_objective_order(
+        DEFAULT_OBJECTIVE_ORDER if objective_order is None else objective_order)
     if time_limit_s <= 0 or type(workers) is not int or workers < 1:
         raise ValueError("Solver time budget and worker count must be positive")
     if type(campus_capacity) is not int or campus_capacity < 1:
         raise ValueError("campus_capacity must be a positive integer")
     if type(wellness_capacity) is not int or wellness_capacity < 1:
         raise ValueError("wellness_capacity must be a positive integer")
+    if type(wellness_shifts_per_week) is not int or not 1 <= wellness_shifts_per_week <= 5:
+        raise ValueError("wellness_shifts_per_week must be an integer from 1 to 5")
     if any(kind not in ("ALS", "BLS") for kind in providers.values()):
         raise ValueError("Every ambulance shift must explicitly specify ALS or BLS")
     people = sorted(people, key=lambda p: p.email)
@@ -128,7 +135,8 @@ def solve_schedule(
         cap = ambulance_capacity(*key, providers[key])
         model.add(sum(v for _, v in entries) <= cap)
         if providers[key] == "ALS":
-            # An unfilled EVDT seat stays open; Auth never satisfies ALS driving.
+            # Preserve one EVDT Driver opportunity; other requests may still
+            # fill the remaining crew capacity, but Auth cannot replace EVDT.
             model.add(sum(v for pi, v in entries if not people[pi].is_evdt) <= cap - 1)
     for entries in cr_by_key.values():
         model.add(sum(v for _, v in entries) <= campus_capacity)
@@ -158,7 +166,7 @@ def solve_schedule(
                 monday = key[0] - timedelta(days=key[0].weekday())
                 weekly_wellness[monday].append(var)
         for entries in weekly_wellness.values():
-            model.add(sum(entries) <= 1)
+            model.add(sum(entries) <= wellness_shifts_per_week)
         for d, entries in days.items():
             occupied = []
             for hour in (7, 10, 13, 16):
@@ -220,6 +228,8 @@ def solve_schedule(
     # Keep weekend ALS driving ahead of fourth night volunteers.
     for rank in (2, 3):
         add_weekend_objective(rank, "als", "ALS shifts with EVDT")
+    # Soft priority only: after coverage and higher-ranked weekend stages,
+    # assign EVDTs to ALS rather than BLS shifts when the feasible options allow.
     objectives.append(("Other ALS shifts with EVDT", sum(als_other)))
     # Build Saturday/Sunday crews toward three volunteers before adding fourth
     # Friday/Saturday-night seats.
@@ -235,6 +245,13 @@ def solve_schedule(
         ("Campus hours within caps", sum(cr_hours)),
         ("Wellness Wagon shifts filled", sum(v for entries in wellness_by_key.values() for _, v in entries)),
     ])
+    # The list above remains the canonical/default ranking. Only its sequence is
+    # configurable; the expressions and hard scheduling constraints are unchanged.
+    objective_by_id = dict(zip(DEFAULT_OBJECTIVE_ORDER, objectives, strict=True))
+    if any(name != OBJECTIVE_LABELS[identifier]
+           for identifier, (name, _) in objective_by_id.items()):
+        raise RuntimeError("Objective IDs and solver stages are out of sync")
+    objectives = [objective_by_id[identifier] for identifier in objective_order]
     values, stages = _optimize(model, objectives, time_limit_s, workers)
     result = Schedule(
         {k: [] for k in sorted(providers)},

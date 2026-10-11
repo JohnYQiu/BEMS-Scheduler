@@ -12,6 +12,7 @@ from models import (
     CAMPUS_BLOCKS, HourCaps, LockedAssignment, ShiftKey, ambulance_capacity, all_campus_keys,
     all_shift_keys, all_wellness_keys, block_dates, campus_ambulance_overlap, interval, is_weekend,
 )
+from policy import DEFAULT_OBJECTIVE_ORDER, validate_objective_order
 
 
 @dataclass
@@ -33,6 +34,8 @@ class Configuration:
     daynum_start: int
     overrides: dict[str, str]
     locks: list[LockedAssignment]
+    objective_order: tuple[str, ...] = DEFAULT_OBJECTIVE_ORDER
+    wellness_shifts_per_week: int = 1
     forced_crews: list[dict] = field(default_factory=list)
 
 
@@ -96,6 +99,15 @@ def load_config(path: str | Path) -> Configuration:
     if type(wellness_enabled) is not bool or type(wellness_capacity) is not int or wellness_capacity < 1:
         raise ValueError("wellness_wagon.enabled must be true/false and capacity a positive integer")
     wellness_keys = all_wellness_keys(dates) if wellness_enabled else []
+    rules = cfg.get("rules", {})
+    if not isinstance(rules, dict):
+        raise ValueError("rules must be a JSON object")
+    unknown_rules = set(rules) - {"wellness_shifts_per_week"}
+    if unknown_rules:
+        raise ValueError(f"Unsupported scheduling rules: {', '.join(sorted(unknown_rules))}")
+    wellness_shifts_per_week = rules.get("wellness_shifts_per_week", 1)
+    if type(wellness_shifts_per_week) is not int or not 1 <= wellness_shifts_per_week <= 5:
+        raise ValueError("rules.wellness_shifts_per_week must be an integer from 1 to 5")
 
     hours = cfg.get("hours", {})
     caps = HourCaps(hours.get("ambulance_emt", 18), hours.get("campus_emt", 6), hours.get("campus_bert", 9))
@@ -166,5 +178,8 @@ def load_config(path: str | Path) -> Configuration:
         local_path(wellness.get("output_xlsx", "outputs/wellness_wagon.xlsx")) if wellness_enabled else None,
         local_path(master.get("path", "outputs/master_schedule.csv")) if master.get("enabled", True) else None,
         master.get("block", ""), int(master.get("daynum_start", dates[0].month * 100 + dates[0].day)),
-        overrides, locks, normalized_forces,
+        overrides, locks,
+        validate_objective_order(cfg.get("objective_order", DEFAULT_OBJECTIVE_ORDER)),
+        wellness_shifts_per_week,
+        normalized_forces,
     )

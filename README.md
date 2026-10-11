@@ -37,8 +37,9 @@ below run from the project folder; there is no need to activate the environment.
 
 Export the **Form Responses** tab as a CSV. Keep the original question headers
 and response rows; no manual reformatting is needed. The parser supports the
-existing BEMS legacy, shopping-period, and Block 2 forms. A redesigned form may
-need parser changes.
+existing BEMS legacy, shopping-period, Block 2, and Block 3 forms, including the
+optional EMT class-conflict question. If a later form changes question wording,
+check the header mappings and parser before scheduling.
 
 Create an input folder if it does not exist:
 
@@ -74,17 +75,21 @@ Open `config.json` in a text editor. Update these settings for every new block:
 | `hours.ambulance_emt` | Ambulance hours per EMT; currently `18`. |
 | `hours.campus_emt` | Separate Campus Response hours per EMT; currently `6`. |
 | `hours.campus_bert` | Campus Response hours per campus-only ERT/BERT member; currently `9`. |
-| `shift_providers` | Every date's manually supplied ALS/BLS supervisor type, as explained below. |
-| `master_schedule_export.block` | Block label used in exported shift IDs; currently `F26B2`. |
-| `master_schedule_export.daynum_start` | First day's sequential ID number; currently `921`. See export details below. |
+| `shift_providers` | Every date's ALS/BLS classification from the supervisor calendar, as explained below. |
+| `master_schedule_export.block` | Block label used in exported shift IDs; the F26B3 config uses `F26B3`. |
 
 The hour settings are both targets and hard maximums. A person may finish below
 target and will be reported; the solver never exceeds the maximum. Ambulance
-hours must be a multiple of 6 and campus hours a multiple of 3.
+hours must be a multiple of 6 and campus hours a multiple of 3. Both F26B2 and
+F26B3 are 28-day blocks, so F26B3 keeps the same per-block targets: 18 ambulance
+hours per EMT, 6 Campus Response hours per EMT, and 9 Campus Response hours per
+campus-only ERT/BERT member.
 
-The checked-in configuration is for **September 21–October 18, 2026**, with that
-block's supplied ALS roster and BLS on all remaining shifts. For another block,
-replace the dates and provider entries rather than reusing that roster.
+The default configuration is for **September 21–October 18, 2026**. The separate
+`config_f26b3.json` is for **October 19–November 15, 2026** and has its own
+provider map and output paths. For F26B3, only shifts supervised by Chief
+Sanderson, Emily Binns, Jeff Magill, or Andrew Tetreault are ALS; all other
+supervisor-calendar entries, including OPEN and Utility Ops, are BLS.
 
 ### Enter ALS/BLS for every day and night
 
@@ -176,6 +181,11 @@ To solve and validate **without writing output files**, use this instead:
 - Availability is required. For EMTs, AM makes campus A and B individually
   eligible; PM makes C and D eligible. This does not require assigning both
   campus blocks. Campus-only members use their submitted A–D availability.
+- Ambulance EMTs may optionally report intended class, lab, or conference
+  sessions as `WEEKLY TUE 10:30-11:50` or `2026-10-27 13:00-14:30`. Any time
+  overlap hard-blocks the affected Campus Response block, without changing
+  Ambulance availability. Invalid nonempty entries stop parsing rather than
+  silently allowing a conflicting assignment.
 - Campus blocks run on weekdays: A 07:00–10:00, B 10:00–13:00,
   C 13:00–16:00, D 16:00–19:00. Campus-only members never count as ambulance EMTs.
 - Multiple assignments on the same day must be contiguous, with no overlaps,
@@ -192,15 +202,25 @@ To solve and validate **without writing output files**, use this instead:
 
 ### Driving and priorities
 
-Every shift has a supervisor who can drive the ambulance. On ALS shifts, an
-EVDT lets the ALS provider treat in the back during transport; one volunteer
-seat is reserved for an EVDT and stays open if none is assigned. An Auth cannot
-fill that ALS driving role.
+The supervisor calendar determines shift type. For F26B3, only Chief Sanderson,
+Emily Binns, Jeff Magill, and Andrew Tetreault make a shift ALS; all other
+supervisors and OPEN/Utility Ops entries are BLS in that block's supplied
+classification. An ALS shift without an assigned EVDT remains classified ALS;
+the output flags `ALS — NO EVDT` for officer review. It is not automatically
+reclassified or treated as an operational status decision.
 
-On Friday/Saturday nights and Saturday/Sunday days with a BLS supervisor, an
-Auth or EVDT can drive Utility for split crew while the supervisor drives the
-ambulance. They are equally eligible for Utility. Weekday BLS shifts have no
-driver preference. EVDTs remain eligible for campus work under the usual rules.
+The R1 `Driver` seat is credentialed, not a separate vehicle. Put an EVDT there
+whenever assigned, on either ALS or BLS. An AUTH driver may take that seat on a
+BLS shift if no EVDT is assigned. On ALS shifts, AUTH stays in C2 or later and
+the EVDT-required Driver seat remains open, preserving the chance for an EVDT to
+pick it up. Remaining volunteers occupy C2, C3, and so on with `CREW` requirements.
+The solver prefers EVDTs on ALS shifts when feasible, without overriding the
+other hard constraints or staged scheduling priorities. Availability requests
+are not filtered by driver credentials: non-drivers can still be assigned as
+crew on remaining seats, including extra hands on ALS shifts while the EVDT
+Driver seat remains open. A person in a crew seat is not treated as a driver.
+
+EVDTs remain eligible for campus work under the usual rules.
 
 Weekend staffing uses exactly these four shift categories:
 
@@ -215,37 +235,30 @@ Friday daytime and Sunday night are ordinary shifts for staffing purposes.
 A NIGHT shift belongs to the date when it starts at 19:00, even though it ends
 at 07:00 the next morning.
 
-A BLS shift is ready for split crew with **three volunteers, including at least
-one Auth or EVDT**: supervisor + EMT on the ambulance, driver + EMT on Utility.
-An ALS split crew needs three volunteers including an EVDT for the ambulance
-and a **second, distinct Auth or EVDT** for Utility.
+The current solver **does not model Utility vehicle assignments or drivers**.
+It optimizes ambulance volunteer seats and exports R1/C2+ rows. A three-person
+weekend crew is a staffing target within the ambulance model, not a claim that
+Utility is staffed or ready. Do not use the workbook as a Utility readiness check.
 
-**Nights are a higher staffing tier than days.** The solver builds Friday-night
-split crews first, then Saturday-night split crews. A fourth Friday volunteer
-cannot take priority over the third person needed for Saturday-night split crew.
-Within each night category, completing a three-person split crew takes priority
-over adding fourth volunteers to other shifts in that category.
+**Nights are a higher staffing tier than days in the default priority order.**
+The solver builds Friday-night crews toward three volunteers, then
+Saturday-night crews, before prioritizing Saturday/Sunday daytime crews.
+An extra fourth volunteer comes after the higher-priority three-person goals.
+The exact sequence of all 18 soft goals is shown in the browser editor and in
+the workbook's Solver sheet. Officers may reorder those goals for a block
+without changing any hard scheduling constraints.
 
-Once night split crews are protected, ALS driving takes priority over fourth
-night volunteers. This preserves the rule that an EVDT can cover weekday ALS
-once a BLS night already has three people and a qualified driver. The solver
-then builds Saturday/Sunday crews toward three volunteers before adding fourth
-Friday/Saturday-night volunteers. Day crews cannot displace a higher-priority
-night split crew, but an extra night seat cannot take precedence over baseline
-day coverage.
-
-The solver applies these priorities in order, preserving each earlier attained
-result while choosing later assignments:
+The default solver applies these priority groups in order, preserving each
+earlier attained result while choosing later assignments:
 
 1. Ambulance shifts with at least one EMT alongside the supervisor.
-2. Friday nights: ALS EVDT coverage, qualified split crews, staffing toward three volunteers, and BLS Utility driving.
-3. Saturday nights: the same goals, after Friday-night results are protected.
-4. Remaining ALS driving: Saturday days, Sunday days, then other ALS shifts.
-5. Weekend day split crews and staffing toward three: Saturday days, then Sunday days. Drivers must qualify for each vehicle.
-6. Extra night volunteers up to the four-person capacity: Friday nights, then Saturday nights.
-7. Extra day volunteers up to capacity: Saturday days, then Sunday days.
-8. Ambulance hours within individual caps.
-9. Campus blocks with at least one responder, then campus hours within individual caps.
+2. Friday and Saturday nights: ALS EVDT coverage, then crew seats toward three.
+3. Saturday and Sunday days: ALS EVDT coverage; then other ALS shifts with EVDT.
+4. Saturday and Sunday day crew seats toward three.
+5. Extra weekend volunteer seats: Friday night, Saturday night, Saturday day, Sunday day.
+6. Ambulance hours within individual caps.
+7. Campus blocks with at least one responder, then campus hours within individual caps.
+8. Wellness Wagon shifts filled, if enabled.
 
 These are separate optimization stages, not small score bonuses: extra day
 staffing cannot compensate for a worse attained night result. The Solver sheet
@@ -260,7 +273,8 @@ Set `wellness_wagon.enabled` to `true` in `config.json` to create a separate
 `outputs/wellness_wagon.xlsx` file. The scheduler reads the form's **Are you working
 for the Wellness Wagon?** response and its weekday AM/PM Wellness Wagon availability
 columns. It assigns at most the configured `capacity` people per Wellness shift and at
-most one Wellness shift per person in each Monday–Friday week. Wellness is a final,
+most one Wellness shift per person in each Monday–Friday week by default (the supported
+`rules.wellness_shifts_per_week` option can change this from 1 to 5). Wellness is a final,
 lower-priority objective: it cannot reduce the attained ambulance or Campus Response
 results, does not count toward ambulance/CR requirements, and follows the same overlap
 and 12-hour rest rules. It is intentionally excluded from `master_schedule.csv`.
@@ -308,16 +322,11 @@ Duplicate responses use the latest timestamp for each email, including role chan
 
 `output_xlsx` sets the workbook path. `master_schedule_export.path` sets the CSV
 path; set `master_schedule_export.enabled` to `false` if you only want the workbook.
-The CSV columns are `Block, ShiftID, Date, Shift, Vehicle, Seat, Requires, Assigned/Name`.
-ALS ambulance Driver rows use `R1`/`EVDT`; Utility Driver rows use `U1`/`AUTH`
-(EVDT also qualifies); other volunteer seats use `CREW`. Campus rows use `CR`.
+The CSV columns match the live V3 Master Schedule: `ShiftID, Date, Shift, Vehicle, Seat, Requires, Assigned/Name`.
+Shift IDs use the calendar date as MMDD, for example `F26B3-1019-AM-R1-EVDT`.
+Driver rows use `R1`/`Driver`, with `Requires` set to `EVDT` or `AUTH` as
+applicable; crew rows use `C2`, `C3`, and so on with `CREW`. Campus rows use `CR`.
 Supervisors are not duplicated in these volunteer rows.
-
-`daynum_start` is a sequential identifier, not a changing calendar date: starting
-at `921`, September 30 is `930` and October 1 is `931`. Coordinate this with the
-Master Schedule's ID convention when setting up a new block. Vehicle/seat IDs
-reflect the current driving roles; review the whole export before replacing
-rows from the older R1-only export format.
 
 ## What each file is for
 
@@ -348,31 +357,74 @@ Run the existing checks after changing code:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-## Required crews for busy shifts (`forced_crews`)
+## Local browser policy editor (optional)
 
-The scheduler can pin a group of ambulance EMTs to a specific shift, then
-schedule everyone else around those assignments. This uses the same hard
-assignment mechanism as individual locks. Forced members count toward their
-hour limits, must be available in the latest local form export, and must satisfy
-shift capacity, qualifications, overlap, and rest requirements. A conflict
-stops the run rather than quietly dropping a required member. The solver may
-fill remaining seats; a force does not freeze the whole shift.
+For a first-time macOS setup, download and extract this trusted project folder,
+then double-click **Install on Desktop.command**. It creates a separate
+`~/Desktop/BEMS Scheduler` folder, installs pinned dependencies in `.venv`,
+and places **Open BEMS Editor.command** and **Run Scheduler.command** launchers
+on the Desktop. It never overwrites an existing installation and does not copy
+private inputs or generated outputs. Python 3.11–3.13 and internet access for
+pinned package downloads are required; Windows needs manual setup. The installer
+has been syntax-checked and tested with a temporary home, but its live pip and
+Finder/Gatekeeper experience should be tried on a fresh Mac before distributing.
+See [OFFICER_GUIDE.md](OFFICER_GUIDE.md) for a nontechnical explanation of
+sources, constraints, priorities, forced crews, and review steps.
 
-Add `forced_crews` to the selected block config, for example:
+You can configure a block without editing Python or JSON by running this from the
+project folder:
 
-```json
-"forced_crews": [
-  {"date": "2026-09-21", "shift": "AM",
-   "members": ["driver@example.com", "crew@example.com"],
-   "note": "Busy morning"}
-]
+```sh
+.venv/bin/python editor.py config.json
 ```
 
-Use individual weekday `AM` or `PM` shifts, weekend `DAY`, or `NIGHT`.
-Emails must match the latest responses. This version retains the ordinary
-Terminal workflow: run `main.py --check` first, then inspect the output before
-publishing. The separate `officer-editor` branch provides a local browser UI
-for composing these crews from the available-member list.
+For another block, first make a separate config file (for example,
+`cp config.json config_next_block.json`), then run
+`.venv/bin/python editor.py config_next_block.json`. The editor opens only on
+`127.0.0.1` on your computer. It does **not** run the solver, upload responses,
+or publish the schedule. Keep the Terminal window open while using it; press
+Ctrl-C when done.
 
-**Current model boundary:** Utility vehicle assignments are not modeled by the
-solver. A three-person ambulance crew target is not proof of Utility readiness.
+In the browser, set the block dates, review settings, mark each ambulance shift
+ALS or BLS, and reorder the existing objective priorities if policy calls for it.
+For a new date range, use **Set unassigned shifts to BLS**, then mark the ALS
+shifts from the supervisor calendar. Weekday AM and PM may be classified
+separately. Every active shift must be classified before saving. The editor
+validates the full config and makes a unique `.bak-...` copy of the prior file
+before saving. Review the displayed backup path if you need to restore it.
+
+The **default priority order is exactly the previous solver order**. If you do
+not reorder anything, scheduling objectives are unchanged. Reordering changes
+which *soft* goal wins a conflict; it does not change how a goal is scored or
+remove hard limits on availability, qualifications, hours, overlap, or rest.
+All 18 supported objectives must remain in the list. Some may not apply to a
+given block and are skipped by the solver. The order is saved as
+`objective_order` in the chosen config, not as edits to `solver.py`.
+
+The **Supported rule library** lets you add implemented rules, currently the
+per-person weekly Wellness shift maximum. This changes a hard limit in both the
+solver and validator while leaving the default at one. Future rules must be
+implemented and tested in the loader, solver, and validator before being added
+to the catalogue; typing an invented rule will not make it work.
+
+**Forced crews:** after saving the dates and form-response path, use the editor's
+Forced crews section to choose a shift and members who appear available in the
+latest local form export. Each listed member is required on that shift. The
+solver may fill remaining seats, but cannot exceed capacity, hours, or rest
+limits. If a required member is unavailable or forces conflict, the check fails
+rather than silently dropping the force. The config stores these in
+`forced_crews`; pre-existing individual `locked_assignments` remain supported.
+
+After saving, use the normal commands with that same config file, for example:
+
+```sh
+.venv/bin/python main.py config_next_block.json --check
+.venv/bin/python main.py config_next_block.json
+```
+
+The editor currently exposes the existing hour/capacity settings, priority
+order, forced crews, and implemented optional rules, not arbitrary new scheduling rules. A new hard rule, shift geometry,
+credential policy, or scoring method still requires a reviewed code change and
+matching validation tests. Do not assume that moving a priority guarantees a
+better schedule: compare the Solver, Warnings, and Hour Summary tabs, especially
+when the solve reports `FEASIBLE` or a time limit.

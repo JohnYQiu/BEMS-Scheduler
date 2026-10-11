@@ -27,10 +27,12 @@ def run(config_path, check_only=False):
     schedule = solve_schedule(
         people, config.providers, config.campus_keys, config.caps,
         config.campus_capacity, config.locks, config.time_limit_s, config.workers,
-        config.wellness_keys, config.wellness_capacity)
+        config.wellness_keys, config.wellness_capacity, config.objective_order,
+        config.wellness_shifts_per_week)
     errors = validate_schedule(
         schedule, people, config.providers, config.campus_keys, config.caps,
-        config.campus_capacity, config.locks, config.wellness_keys, config.wellness_capacity)
+        config.campus_capacity, config.locks, config.wellness_keys, config.wellness_capacity,
+        config.wellness_shifts_per_week)
     if errors:
         raise RuntimeError("Schedule failed validation; nothing exported:\n" + "\n".join(errors))
     print("All hard scheduling rules verified against the resulting assignments.")

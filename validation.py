@@ -8,7 +8,8 @@ from models import HourCaps, Schedule, Volunteer, ambulance_capacity, interval, 
 
 def validate_schedule(schedule: Schedule, people, providers, campus_keys,
                       caps: HourCaps, campus_capacity: int, locks=(),
-                      wellness_keys=(), wellness_capacity: int = 1) -> list[str]:
+                      wellness_keys=(), wellness_capacity: int = 1,
+                      wellness_shifts_per_week: int = 1) -> list[str]:
     errors = []
     roster = {p.email: p for p in people}
     if len(roster) != len(people):
@@ -71,8 +72,8 @@ def validate_schedule(schedule: Schedule, people, providers, campus_keys,
         weeks = defaultdict(int)
         for d, _ in wellness:
             weeks[d - timedelta(days=d.weekday())] += 1
-        if any(count > 1 for count in weeks.values()):
-            errors.append(f"{p.full_name}: more than one Wellness Wagon shift in a week")
+        if any(count > wellness_shifts_per_week for count in weeks.values()):
+            errors.append(f"{p.full_name}: more than {wellness_shifts_per_week} Wellness Wagon shift(s) in a week")
         work = sorted(interval(k) for k in ambulance + campus + wellness)
         if not work:
             continue
