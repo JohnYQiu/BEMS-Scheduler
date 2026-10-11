@@ -316,46 +316,53 @@ def print_summary(schedule, people, providers, caps):
 
 
 MASTER_SCHEDULE_HEADER = [
-    "Block", "ShiftID", "Date", "Shift", "Vehicle", "Seat", "Requires", "Assigned/Name",
+    "ShiftID", "Date", "Shift", "Vehicle", "Seat", "Requires", "Assigned/Name",
 ]
 
 
 def _ambulance_seats(key, people, provider):
-    """R1-only volunteer seats; supervisors are supplied separately.
+    """Place volunteer drivers before crew, matching Scheduler V3 seat rows.
 
-    ALS reserves an R1/EVDT driver row, so its crew begins at C2. BLS crew
-    begins at C1. Weekend capacity changes seat count only, never the vehicle.
+    ALS always preserves an EVDT-only Driver seat, even if it stays open; an
+    Auth then occupies C2 or later. On BLS, an EVDT takes Driver first, then
+    an Auth; if neither is assigned, volunteers fill crew seats and the
+    supervisor is the fallback driver. Capacity counts people, not empty seats.
     """
     remaining = sorted(people, key=lambda p: p.full_name)
     seats = []
     cap = ambulance_capacity(*key, provider)
-    next_crew = 2
+    driver = None
     if provider == "ALS":
         driver = next((p for p in remaining if p.is_evdt), None)
         seats.append(("R1", "Driver", "EVDT", driver))
+    else:
+        driver = next((p for p in remaining if p.is_evdt), None)
+        if driver is None:
+            driver = next((p for p in remaining if p.certification == "Auth"), None)
         if driver is not None:
-            remaining.remove(driver)
-    for p in remaining:
-        seats.append(("R1", f"C{next_crew}", "CREW", p))
-        next_crew += 1
-    while len(seats) < cap:
-        seats.append(("R1", f"C{next_crew}", "CREW", None))
-        next_crew += 1
-    if len(seats) > cap:
+            seats.append(("R1", "Driver", driver.certification.upper(), driver))
+    if driver is not None:
+        remaining.remove(driver)
+    crew_slots = cap - (1 if driver is not None or provider == "ALS" else 0)
+    for i in range(crew_slots):
+        person = remaining[i] if i < len(remaining) else None
+        seats.append(("R1", f"C{i + 2}", "CREW", person))
+    if len(remaining) > crew_slots:
         raise ValueError(f"Export would exceed capacity for {key}")
     return seats
 
 
 def export_master_schedule_csv(schedule, providers, block_start, output_path,
-                               block, daynum_start, campus_capacity=2):
+                               block, daynum_start=None, campus_capacity=2):
+    """Write rows in the live V3 Master Schedule schema; IDs use MMDD dates."""
     rows = []
 
     def row(key, vehicle, seat, requires, person):
         d, kind = key
-        daynum = daynum_start + (d - block_start).days
+        date_id = f"{d.month:02d}{d.day:02d}"
         suffix = requires if seat == "Driver" else seat
-        shift_id = f"{block}-{daynum:04d}-{kind}-{vehicle}-{suffix}"
-        return [block, shift_id, f"{d.month}/{d.day}/{d:%y}", kind, vehicle,
+        shift_id = f"{block}-{date_id}-{kind}-{vehicle}-{suffix}"
+        return [shift_id, f"{d.month}/{d.day}/{d:%y}", kind, vehicle,
                 seat, requires, person.full_name if person else ""]
 
     for key, people in sorted(schedule.ambulance.items()):

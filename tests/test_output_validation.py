@@ -58,13 +58,31 @@ class OutputTests(unittest.TestCase):
             with path.open(newline='') as f:
                 return list(csv.DictReader(f))
 
-    def test_weekend_bls_auth_is_r1_crew_with_no_utility_vehicle(self):
+    def test_weekend_bls_auth_takes_driver_then_crew_numbers_from_c2(self):
         key = (D + timedelta(days=4), 'NIGHT')
         auth = Volunteer('Auth', 'Person', 'auth@example.com', 'Auth')
-        rows = self.export(Schedule({key: [auth]}, {}), {key: 'BLS'})
+        crew = Volunteer('Crew', 'Person', 'crew@example.com')
+        rows = self.export(Schedule({key: [auth, crew]}, {}), {key: 'BLS'})
         self.assertEqual([(r['Vehicle'], r['Seat'], r['Requires'], r['Assigned/Name']) for r in rows],
-                         [('R1', 'C2', 'CREW', 'Auth Person'),
-                          ('R1', 'C3', 'CREW', ''), ('R1', 'C4', 'CREW', '')])
+                         [('R1', 'Driver', 'AUTH', 'Auth Person'),
+                          ('R1', 'C2', 'CREW', 'Crew Person'),
+                          ('R1', 'C3', 'CREW', '')])
+
+    def test_bls_evdt_is_driver_ahead_of_auth(self):
+        key = (D + timedelta(days=4), 'NIGHT')
+        evdt = Volunteer('EVDT', 'Person', 'evdt@example.com', 'EVDT')
+        auth = Volunteer('Auth', 'Person', 'auth@example.com', 'Auth')
+        rows = self.export(Schedule({key: [auth, evdt]}, {}), {key: 'BLS'})
+        self.assertEqual([(r['Seat'], r['Requires'], r['Assigned/Name']) for r in rows],
+                         [('Driver', 'EVDT', 'EVDT Person'),
+                          ('C2', 'CREW', 'Auth Person'), ('C3', 'CREW', '')])
+
+    def test_export_matches_live_v3_header_and_uses_calendar_date_in_id(self):
+        key = (date(2026, 10, 1), 'NIGHT')
+        rows = self.export(Schedule({key: []}, {}), {key: 'BLS'})
+        self.assertEqual(list(rows[0].keys()),
+                         ['ShiftID', 'Date', 'Shift', 'Vehicle', 'Seat', 'Requires', 'Assigned/Name'])
+        self.assertEqual(rows[0]['ShiftID'], 'F26B2-1001-NIGHT-R1-C2')
 
     def test_als_keeps_evdt_truck_seat_open_when_only_auth_available(self):
         key = (D, 'AM')

@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from configuration import load_config
+from forces import validate_forced_crews
 from output import (export_master_schedule_csv, export_schedule_xlsx,
                     export_wellness_wagon_xlsx, print_summary)
 from parse_form import load_all_responses
@@ -18,6 +19,7 @@ def run(config_path, check_only=False):
     volunteers, bert_members = load_all_responses(
         config.form_csv, config.dates[0], config.dates[-1], config.overrides)
     people = volunteers + bert_members
+    validate_forced_crews(config, volunteers)
     if not people:
         raise ValueError("No scheduling members found in the response CSV")
     print(f"Block: {config.dates[0]} to {config.dates[-1]}")

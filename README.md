@@ -347,3 +347,32 @@ Run the existing checks after changing code:
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+## Required crews for busy shifts (`forced_crews`)
+
+The scheduler can pin a group of ambulance EMTs to a specific shift, then
+schedule everyone else around those assignments. This uses the same hard
+assignment mechanism as individual locks. Forced members count toward their
+hour limits, must be available in the latest local form export, and must satisfy
+shift capacity, qualifications, overlap, and rest requirements. A conflict
+stops the run rather than quietly dropping a required member. The solver may
+fill remaining seats; a force does not freeze the whole shift.
+
+Add `forced_crews` to the selected block config, for example:
+
+```json
+"forced_crews": [
+  {"date": "2026-09-21", "shift": "AM",
+   "members": ["driver@example.com", "crew@example.com"],
+   "note": "Busy morning"}
+]
+```
+
+Use individual weekday `AM` or `PM` shifts, weekend `DAY`, or `NIGHT`.
+Emails must match the latest responses. This version retains the ordinary
+Terminal workflow: run `main.py --check` first, then inspect the output before
+publishing. The separate `officer-editor` branch provides a local browser UI
+for composing these crews from the available-member list.
+
+**Current model boundary:** Utility vehicle assignments are not modeled by the
+solver. A three-person ambulance crew target is not proof of Utility readiness.
