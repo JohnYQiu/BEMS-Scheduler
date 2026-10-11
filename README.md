@@ -8,6 +8,12 @@ Wellness Wagon can be enabled as a separate, manual-entry workbook. It never cha
 **Workflow: export responses → edit `config.json` → run → review the output.**
 The program reads a downloaded file. It does not connect to or update Google Sheets.
 
+This `main` branch is the current Terminal scheduler with forced crews. For the local
+browser editor and macOS desktop installer, use the
+[`feature/officer-editor` branch](https://github.com/noahlangbo/BEMS-Scheduler/tree/feature/officer-editor).
+The pre-forced-crew version remains on
+[`legacy-before-forces`](https://github.com/noahlangbo/BEMS-Scheduler/tree/legacy-before-forces).
+
 ## 1. Set up the project once
 
 These commands are for macOS/Linux and have been tested with Python 3.11.
@@ -17,7 +23,7 @@ If you already have this project, open Terminal in the `BEMS-Scheduler` folder
 To download a new copy:
 
 ```sh
-git clone https://github.com/JohnYQiu/BEMS-Scheduler.git
+git clone https://github.com/noahlangbo/BEMS-Scheduler.git
 cd BEMS-Scheduler
 ```
 
