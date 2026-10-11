@@ -76,6 +76,55 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(load_config(self.path).wellness_shifts_per_week, 1)
         self.assertNotIn('wellness_shifts_per_week', json.loads(self.path.read_text()).get('rules', {}))
 
+    def test_evdt_weekly_als_rule_is_supported(self):
+        version, submitted = self.submission()
+        submitted['optional_rules'] = {'/rules/max_evdt_als_shifts_per_week': 2}
+        editor.save_config(self.path, version, submitted)
+        from configuration import load_config
+        self.assertEqual(load_config(self.path).max_evdt_als_shifts_per_week, 2)
+        version, submitted = self.submission()
+        editor.save_config(self.path, version, submitted)
+        self.assertIsNone(load_config(self.path).max_evdt_als_shifts_per_week)
+
+    def test_custom_priority_saved_with_order_and_unknown_data_preserved(self):
+        version, submitted = self.submission()
+        custom = dict(id='custom:driver-first', label='Driver coverage on BLS nights',
+                      service='ambulance', metric='covered_shifts', member_filter='driver',
+                      provider='BLS', weekdays=[4, 5], shifts=['NIGHT'], direction='maximize')
+        submitted['custom_priorities'] = [custom]
+        submitted['objective_order'].insert(0, custom['id'])
+        editor.save_config(self.path, version, submitted)
+        new = json.loads(self.path.read_text())
+        self.assertEqual(new['custom_priorities'], [custom])
+        self.assertEqual(new['objective_order'][0], custom['id'])
+        self.assertEqual(new['unknown'], self.cfg['unknown'])
+        from configuration import load_config
+        self.assertEqual(load_config(self.path).custom_priorities[0], custom)
+
+    def test_custom_priority_rejects_unknown_fields_and_missing_order_without_write(self):
+        version, submitted = self.submission()
+        custom = dict(id='custom:driver-first', label='Driver', service='ambulance',
+                      metric='assignments', member_filter='driver', provider='any',
+                      weekdays=[], shifts=[], direction='maximize')
+        submitted['custom_priorities'] = [custom]
+        with self.assertRaisesRegex(editor.EditorError, 'exactly once'):
+            editor.save_config(self.path, version, submitted)
+        self.assertEqual(json.loads(self.path.read_text()), self.cfg)
+        submitted['objective_order'].append(custom['id'])
+        custom['extra'] = 'unsupported code'
+        with self.assertRaisesRegex(editor.EditorError, 'Each custom priority needs'):
+            editor.save_config(self.path, version, submitted)
+
+    def test_incompatible_saved_custom_priority_cannot_be_silently_dropped(self):
+        self.cfg['custom_priorities'] = [{'id': 'custom:future', 'label': 'Future rule',
+                                          'service': 'ambulance', 'metric': 'unrecognized'}]
+        self.path.write_text(json.dumps(self.cfg))
+        version, submitted = self.submission()
+        submitted['custom_priorities'] = []
+        with self.assertRaisesRegex(editor.EditorError, 'blocked to prevent data loss'):
+            editor.save_config(self.path, version, submitted)
+        self.assertEqual(json.loads(self.path.read_text()), self.cfg)
+
     def test_unknown_rule_is_rejected(self):
         _, submitted = self.submission()
         submitted['optional_rules'] = {'/rules/fictional_rule': 2}

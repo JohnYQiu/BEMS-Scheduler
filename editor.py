@@ -20,14 +20,15 @@ from urllib.parse import urlsplit
 from configuration import load_config
 from forces import crew_options, load_volunteers, validate_forced_crews
 from models import all_shift_keys, block_dates
-from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, validate_objective_order
+from policy import (CUSTOM_PRIORITY_CATALOG, DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS,
+                    validate_custom_priorities, validate_objective_order)
 from rule_catalog import FIELD_CATALOG, FIELD_BY_PATH, OPTIONAL_RULES, RULE_BY_PATH
 
 DEFAULT_PRIORITIES = DEFAULT_OBJECTIVE_ORDER
 ROOT = Path(__file__).resolve().parent
 MAX_BODY = 256_000
 MAX_DAYS = 366
-RESERVED = {"block_start", "block_end", "shift_providers", "objective_order", "rules"}
+RESERVED = {"block_start", "block_end", "shift_providers", "objective_order", "custom_priorities", "rules"}
 
 
 class EditorError(ValueError):
@@ -81,9 +82,9 @@ def _dates_and_keys(cfg: dict) -> list[str]:
     return [f"{d.isoformat()}:{kind}" for d, kind in all_shift_keys(dates)]
 
 
-def _priority_order(value) -> list[str]:
+def _priority_order(value, custom_priorities=()) -> list[str]:
     try:
-        return list(validate_objective_order(value))
+        return list(validate_objective_order(value, custom_priorities))
     except ValueError as exc:
         raise EditorError(str(exc)) from exc
 
@@ -144,7 +145,16 @@ def build_candidate(original: dict, submitted: dict) -> dict:
     if not isinstance(forced, list) or len(forced) > 200:
         raise EditorError("Forced crews must be a list of at most 200 shifts")
     cfg["forced_crews"] = forced
-    cfg["objective_order"] = _priority_order(submitted.get("objective_order"))
+    try:
+        validate_custom_priorities(original.get("custom_priorities", []))
+    except ValueError as exc:
+        raise EditorError("Existing custom priorities are incompatible with this editor; saving is blocked to prevent data loss: " + str(exc)) from exc
+    try:
+        custom_priorities = validate_custom_priorities(submitted.get("custom_priorities", []))
+    except ValueError as exc:
+        raise EditorError(str(exc)) from exc
+    cfg["custom_priorities"] = list(custom_priorities)
+    cfg["objective_order"] = _priority_order(submitted.get("objective_order"), custom_priorities)
     return cfg
 
 
@@ -251,6 +261,7 @@ def make_handler(config_path: Path, token: str):
                     self._json(200, {"config": cfg, "version": version, "token": token,
                                      "path": str(config_path), "default_priorities": DEFAULT_PRIORITIES,
                                      "priority_labels": OBJECTIVE_LABELS,
+                                     "custom_priority_catalog": CUSTOM_PRIORITY_CATALOG,
                                      "field_catalog": FIELD_CATALOG, "rule_catalog": OPTIONAL_RULES,
                                      "scalar_paths": list(scalar_paths(cfg))})
                 except (OSError, ValueError, json.JSONDecodeError) as exc:

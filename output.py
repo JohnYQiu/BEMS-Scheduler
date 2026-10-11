@@ -279,14 +279,14 @@ def export_schedule_xlsx(schedule: Schedule, people, providers, caps: HourCaps,
     _build_summary_sheet(wb.create_sheet(), people, caps)
     _build_warnings_sheet(wb.create_sheet(), collect_warnings(schedule, providers, people, caps))
     ws = wb.create_sheet("Solver")
-    _header_row(ws, 1, ["Priority", "Objective", "Status", "Achieved", "Upper Bound", "Seconds"],
+    _header_row(ws, 1, ["Priority", "Objective", "Status", "Achieved", "Bound", "Seconds"],
                 [10, 52, 18, 14, 16, 12])
     for row, stage in enumerate(schedule.stages, 2):
         for col, value in enumerate([row - 1, stage.name, stage.status, stage.value,
                                      stage.bound, round(stage.seconds, 3)], 1):
             ws.cell(row, col, value)
     row = len(schedule.stages) + 3
-    ws.cell(row, 1, "Each stage preserves earlier attained values. FEASIBLE is not proof of an optimum.")
+    ws.cell(row, 1, "Each stage preserves earlier attained values. Bound is upper for maximize, lower for minimize. FEASIBLE is not proof of an optimum.")
     wb.save(output_path)
     return str(output_path)
 

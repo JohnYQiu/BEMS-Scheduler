@@ -17,7 +17,8 @@ from validation import validate_schedule
 def run(config_path, check_only=False):
     config = load_config(config_path)
     volunteers, bert_members = load_all_responses(
-        config.form_csv, config.dates[0], config.dates[-1], config.overrides)
+        config.form_csv, config.dates[0], config.dates[-1], config.overrides,
+        require_driver_status=config.requires_driver_status)
     people = volunteers + bert_members
     validate_forced_crews(config, volunteers)
     if not people:
@@ -28,11 +29,12 @@ def run(config_path, check_only=False):
         people, config.providers, config.campus_keys, config.caps,
         config.campus_capacity, config.locks, config.time_limit_s, config.workers,
         config.wellness_keys, config.wellness_capacity, config.objective_order,
-        config.wellness_shifts_per_week)
+        config.wellness_shifts_per_week, config.custom_priorities,
+        config.max_evdt_als_shifts_per_week)
     errors = validate_schedule(
         schedule, people, config.providers, config.campus_keys, config.caps,
         config.campus_capacity, config.locks, config.wellness_keys, config.wellness_capacity,
-        config.wellness_shifts_per_week)
+        config.wellness_shifts_per_week, config.max_evdt_als_shifts_per_week)
     if errors:
         raise RuntimeError("Schedule failed validation; nothing exported:\n" + "\n".join(errors))
     print("All hard scheduling rules verified against the resulting assignments.")

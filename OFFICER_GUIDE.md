@@ -12,11 +12,11 @@ This guide is for officers who do not write code. The scheduler turns members' a
 
 ## Hard rules versus priorities
 
-A **hard rule** is a boundary the schedule cannot cross, such as assigning someone who was unavailable or exceeding their configured hours. Some limits are already editable: hours and Campus/Wellness capacity. The supported rule library includes a weekly Wellness limit. Other safety/credential/rest rules are deliberately fixed until the solver and validator are both updated and tested.
+A **hard rule** is a boundary the schedule cannot cross, such as assigning someone who was unavailable or exceeding their configured hours. Some limits are already editable: hours and Campus/Wellness capacity. The supported rule library includes a weekly Wellness limit and an optional weekly cap on ALS shifts for each EVDT. The EVDT cap uses Driver Status from the saved responses or an officer's configured override and may reduce ALS coverage. Other safety/credential/rest rules are deliberately fixed until the solver and validator are both updated and tested.
 
-A **priority** is a preference among valid schedules. The solver tries the top goal first, preserves its attained result, then moves to the next goal. For example, if ambulance coverage ranks above Campus coverage, it will not give up an attained ambulance-coverage result just to improve Campus coverage. Reordering changes this tradeoff, but does not change what each goal counts. These are **not numerical weights**. A goal with no applicable shifts may be skipped.
+A **priority** is a preference among valid schedules. The solver tries the top goal first, preserves its attained result, then moves to the next goal. For example, if ambulance coverage ranks above Campus coverage, it will not give up an attained ambulance-coverage result just to improve Campus coverage. Reordering changes this tradeoff. You can also create a **custom soft priority** by choosing a service, a count (assignments, shifts covered by a matching member, or hours), filters for provider, weekday, shift type, and member role/Driver Status, and whether to maximize or minimize. For example, prioritize an EVDT on ALS nights or drivers on BLS weekend shifts. Driver Status is normalized from the local form export as EVDT, Auth, or non-driver EMT, with configured overrides taking precedence. The solver only considers eligible assignments; custom preferences never waive hard rules. If a driver-dependent priority or EVDT cap is enabled, the export must have a Driver Status column and recognized answers; blank or ambiguous answers require a corrected export or a verified per-person override. These are **not numerical weights**, free-form formulas, or arbitrary code. All 18 built-in goals remain in the order alongside your custom ones. A goal with no matching eligible assignments may be skipped. A high-priority minimize goal can reduce coverage, and extra stages share the time budget, so review Warnings and Solver.
 
-**Default behavior:** without an `objective_order` or optional `rules` entry, the solver keeps its historical priority order and one Wellness shift per person per week. Simply opening the editor changes nothing. Saving adds explicit choices to the config file and creates a backup.
+**Default behavior:** without `custom_priorities`, `objective_order`, or optional `rules`, the solver keeps its historical priority order and one Wellness shift per person per week. The EVDT weekly cap is off unless added. Simply opening the editor changes nothing. Saving adds explicit choices to the config file and creates a backup.
 
 ## Typical block workflow
 
@@ -24,7 +24,7 @@ A **priority** is a preference among valid schedules. The solver tries the top g
 2. Use a separate config file for the block. Set its start/end dates and output filenames.
 3. Check the supervisor calendar. In the editor, set any new unassigned shifts to BLS, then change the ALS shifts. Review every day. Do not guess missing classifications.
 4. For a busy ambulance shift, use **Forced crews** to pick required members from the eligible list derived from the saved form export. Save dates and form path first if you changed them. A forced member must be available in the current responses; other seats can still be filled by the solver. Do not force someone just because they may become available later.
-5. Review hour limits, capacities, and priorities with the officer responsible for scheduling policy. Add only supported rules that you intend to change. The editor validates the config and keeps a backup on save.
+5. Review hour limits, capacities, and priorities with the officer responsible for scheduling policy. Add a custom priority only when you can explain its filters and likely tradeoff. Add only supported hard rules that you intend to change. The editor validates the config and keeps a backup on save.
 6. Run the normal check command, then generate outputs using the **same config file**:
 
    ```sh
@@ -38,7 +38,7 @@ A **priority** is a preference among valid schedules. The solver tries the top g
 
 - It runs only on your computer at `127.0.0.1`. It saves a local config file and a unique `.bak-...` backup. It never runs the solver itself.
 - A forced crew is a set of **required** ambulance assignments, not a frozen entire shift. The scheduler fills any remaining seats if useful. All forced members still count toward hour caps and must satisfy availability, credential, overlap, and rest constraints. If forces conflict, the run fails instead of quietly dropping them.
-- It offers a catalogue of **implemented** fields and rules. Adding a catalogue entry alone cannot create a new scheduling behavior. A genuinely new rule needs code in the config loader, solver, and validator, plus tests. Never place a proposed rule in the config and assume it is enforced.
+- It offers a catalogue of **implemented** fields and hard rules, plus a bounded builder for custom soft priorities. You can combine supported filters and metrics, not write arbitrary code or a new scoring formula. A genuinely new hard rule needs code in the config loader, solver, and validator, plus tests. Never place a proposed rule in the config and assume it is enforced.
 - The current solver does not model Utility vehicle assignments. Do not interpret a plain-language reference to Utility as proof that it created those assignments.
 - Keep response exports and generated schedules private. They are excluded from Git, but avoid placing them in shared folders or emailing them casually.
 

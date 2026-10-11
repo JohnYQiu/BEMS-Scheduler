@@ -365,15 +365,18 @@ Run the existing checks after changing code:
 
 ## Local browser policy editor (optional)
 
-For a first-time macOS setup, download and extract this trusted project folder,
-then double-click **Install on Desktop.command**. It creates a separate
+For a first-time macOS setup, open the `feature/officer-editor` branch on GitHub,
+choose **Code → Download ZIP**, extract the archive, then double-click
+**Install on Desktop.command** in its top-level folder. Do not download `main` for
+the editor; that branch contains only the Terminal scheduler. It creates a separate
 `~/Desktop/BEMS Scheduler` folder, installs pinned dependencies in `.venv`,
 and places **Open BEMS Editor.command** and **Run Scheduler.command** launchers
 on the Desktop. It never overwrites an existing installation and does not copy
 private inputs or generated outputs. Python 3.11–3.13 and internet access for
 pinned package downloads are required; Windows needs manual setup. The installer
-has been syntax-checked and tested with a temporary home, but its live pip and
-Finder/Gatekeeper experience should be tried on a fresh Mac before distributing.
+has been tested on a Mac with Python 3.11 via Terminal, including dependency
+installation and a repeat-run no-overwrite check. Finder/Gatekeeper behavior on a
+fresh Mac still needs a separate trial.
 See [OFFICER_GUIDE.md](OFFICER_GUIDE.md) for a nontechnical explanation of
 sources, constraints, priorities, forced crews, and review steps.
 
@@ -392,26 +395,40 @@ or publish the schedule. Keep the Terminal window open while using it; press
 Ctrl-C when done.
 
 In the browser, set the block dates, review settings, mark each ambulance shift
-ALS or BLS, and reorder the existing objective priorities if policy calls for it.
+ALS or BLS, and reorder built-in or custom objective priorities if policy calls for it.
 For a new date range, use **Set unassigned shifts to BLS**, then mark the ALS
 shifts from the supervisor calendar. Weekday AM and PM may be classified
 separately. Every active shift must be classified before saving. The editor
 validates the full config and makes a unique `.bak-...` copy of the prior file
 before saving. Review the displayed backup path if you need to restore it.
 
-The **default priority order is exactly the previous solver order**. If you do
-not reorder anything, scheduling objectives are unchanged. Reordering changes
-which *soft* goal wins a conflict; it does not change how a goal is scored or
-remove hard limits on availability, qualifications, hours, overlap, or rest.
-All 18 supported objectives must remain in the list. Some may not apply to a
-given block and are skipped by the solver. The order is saved as
-`objective_order` in the chosen config, not as edits to `solver.py`.
+The **default priority order is exactly the previous solver order**. Without
+custom priorities, behavior is unchanged. The editor can create a new soft
+priority from supported ingredients: ambulance, Campus Response, or Wellness
+assignments; count seats, shifts with at least one matching person, or hours;
+filter by day of week, shift type, ALS/BLS (ambulance only), and member role or
+Driver Status (any, EVDT, Auth, driver, non-driver, EMT, or campus-only BERT);
+then maximize or minimize the result. Driver Status comes from the saved Form
+Responses export, with configured overrides taking precedence. For example,
+create **BLS weekend nights with a driver** using ambulance / covered shifts /
+driver / BLS / Friday and Saturday / NIGHT / maximize. Move the new item above
+or below the 18 existing objectives. All configured priorities must appear once;
+a stage with no eligible matching assignments is skipped. Driver-dependent
+priorities and the EVDT cap require a Driver Status column and recognized values
+(EVDT, Auth/Authorized, or non-driver EMT); an unknown or blank answer stops the
+run unless an officer supplies a validated per-person override. They remain
+sequential lexicographic goals, **not numerical weights or an arbitrary-code
+scripting language**. Minimize stages show the actual nonnegative count in the
+Solver tab, with a lower bound rather than an upper bound. A high-priority minimize goal can lower coverage, so inspect the
+Solver and Warnings tabs. More stages share the same solve time budget.
 
-The **Supported rule library** lets you add implemented rules, currently the
-per-person weekly Wellness shift maximum. This changes a hard limit in both the
-solver and validator while leaving the default at one. Future rules must be
-implemented and tested in the loader, solver, and validator before being added
-to the catalogue; typing an invented rule will not make it work.
+The **Supported rule library** includes the per-person weekly Wellness maximum
+(default one) and an optional weekly maximum on ALS assignments for each EVDT.
+The latter uses form-derived Driver Status and, if enabled, may leave ALS shifts
+without an EVDT. Both are hard limits enforced by the solver and independent
+validator. Neither overrides availability, capacity, hours, rest, or credential
+rules. A new hard rule outside this catalogue still needs implementation and
+tests; typing an invented key does not enforce it.
 
 **Forced crews:** after saving the dates and form-response path, use the editor's
 Forced crews section to choose a shift and members who appear available in the
@@ -428,9 +445,10 @@ After saving, use the normal commands with that same config file, for example:
 .venv/bin/python main.py config_next_block.json
 ```
 
-The editor currently exposes the existing hour/capacity settings, priority
-order, forced crews, and implemented optional rules, not arbitrary new scheduling rules. A new hard rule, shift geometry,
-credential policy, or scoring method still requires a reviewed code change and
-matching validation tests. Do not assume that moving a priority guarantees a
+The editor exposes existing hour/capacity settings, forced crews, supported
+optional rules, and declarative custom soft priorities. It does not execute
+free-form code or invent hard rules. A new hard rule, shift geometry, credential
+policy, or scoring metric outside the supported vocabulary still requires a
+reviewed code change and matching validation tests. Do not assume that moving a priority guarantees a
 better schedule: compare the Solver, Warnings, and Hour Summary tabs, especially
 when the solve reports `FEASIBLE` or a time limit.

@@ -153,6 +153,23 @@ class InputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Driver overrides'):
             self.load([row], driver_status_overrides={'test@example.com': 'invalid'})
 
+    def test_driver_dependent_policy_rejects_missing_or_ambiguous_status(self):
+        row = ['9/18/2026 10:00:00', 'test@example.com', 'Ambulance EMT',
+               'Test', 'Person', 'Not authorized', 'AM', '', '', '', '']
+        with self.assertRaisesRegex(ValueError, 'Unrecognized Driver Status'):
+            self.load([row], require_driver_status=True)
+        emts, _ = self.load([row], require_driver_status=True,
+                            driver_status_overrides={'test@example.com': 'EMT'})
+        self.assertEqual(emts[0].certification, 'EMT')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'responses.csv'
+            with path.open('w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(HEADERS[:5] + HEADERS[6:])
+                writer.writerow(row[:5] + row[6:])
+            with self.assertRaisesRegex(ValueError, 'Driver Status column'):
+                load_all_responses(path, D, D, require_driver_status=True)
+
     def test_f26b3_config_preserves_minimum_hours_for_same_length_block(self):
         root = Path(__file__).resolve().parents[1]
         prior = load_config(root / 'config.json')
@@ -167,6 +184,34 @@ class InputTests(unittest.TestCase):
         self.assertEqual(next_block.providers[(date(2026, 10, 19), 'AM')], 'ALS')
         self.assertEqual(next_block.providers[(date(2026, 10, 25), 'NIGHT')], 'BLS')
         self.assertEqual(next_block.providers[(date(2026, 11, 14), 'DAY')], 'BLS')
+
+    def test_form_driver_status_flows_into_custom_priority(self):
+        from policy import DEFAULT_OBJECTIVE_ORDER
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (root / 'responses.csv').open('w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(HEADERS)
+                writer.writerow(['9/18/2026 10:00:00', 'driver@example.com', 'Ambulance EMT',
+                                 'Driver', 'Person', 'Authorized - Utility 1', 'AM', '', '', '', ''])
+                writer.writerow(['9/18/2026 10:00:00', 'other@example.com', 'Ambulance EMT',
+                                 'Other', 'Person', 'Not a driver', 'AM', '', '', '', ''])
+            custom = dict(id='custom:bls-driver', label='BLS driver coverage',
+                          service='ambulance', metric='covered_shifts', member_filter='driver',
+                          provider='BLS', weekdays=[0], shifts=['AM'], direction='maximize')
+            cfg = dict(block_start=str(D), block_end=str(D),
+                       shift_providers={f'{D}:DAY': 'BLS', f'{D}:NIGHT': 'BLS'},
+                       form_csv='responses.csv', hours={'ambulance_emt': 6},
+                       solver_workers=1, solver_time_limit_s=5,
+                       custom_priorities=[custom],
+                       objective_order=[custom['id'], *DEFAULT_OBJECTIVE_ORDER])
+            path = root / 'config.json'
+            path.write_text(json.dumps(cfg))
+            with contextlib.redirect_stdout(io.StringIO()):
+                schedule = run(path, check_only=True)
+            self.assertEqual([p.email for p in schedule.ambulance[(D, 'AM')]],
+                             ['driver@example.com'])
+            self.assertEqual(schedule.stages[0].value, 1)
 
     def test_forced_crew_is_required_and_respects_hours_and_availability(self):
         with tempfile.TemporaryDirectory() as tmp:

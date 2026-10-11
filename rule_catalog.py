@@ -43,6 +43,11 @@ OPTIONAL_RULES = [
          description="Hard maximum Monday–Friday Wellness shifts for one person. The default is one.",
          source="This block's policy configuration; enforced by the solver and independent validator",
          optional=True),
+    dict(path="/rules/max_evdt_als_shifts_per_week", label="Maximum ALS shifts per EVDT per week",
+         group="Supported rule library", type="number", default=2, min=1, max=7,
+         description="Optional hard maximum of ALS ambulance shifts for each EVDT in a Monday–Sunday week. Driver status comes from the saved form response or a configured override. A low limit may leave ALS shifts without an EVDT.",
+         source="Form Driver Status and local policy; enforced by the solver and independent validator",
+         optional=True),
 ]
 
 FIELD_BY_PATH = {entry["path"]: entry for entry in FIELD_CATALOG}

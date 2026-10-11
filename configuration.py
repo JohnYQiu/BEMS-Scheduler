@@ -12,7 +12,7 @@ from models import (
     CAMPUS_BLOCKS, HourCaps, LockedAssignment, ShiftKey, ambulance_capacity, all_campus_keys,
     all_shift_keys, all_wellness_keys, block_dates, campus_ambulance_overlap, interval, is_weekend,
 )
-from policy import DEFAULT_OBJECTIVE_ORDER, validate_objective_order
+from policy import DEFAULT_OBJECTIVE_ORDER, validate_custom_priorities, validate_objective_order
 
 
 @dataclass
@@ -37,6 +37,15 @@ class Configuration:
     objective_order: tuple[str, ...] = DEFAULT_OBJECTIVE_ORDER
     wellness_shifts_per_week: int = 1
     forced_crews: list[dict] = field(default_factory=list)
+    custom_priorities: tuple[dict, ...] = ()
+    max_evdt_als_shifts_per_week: int | None = None
+
+    @property
+    def requires_driver_status(self) -> bool:
+        return self.max_evdt_als_shifts_per_week is not None or any(
+            item["member_filter"] in ("driver", "evdt", "auth", "non_driver")
+            for item in self.custom_priorities
+        )
 
 
 def _json_file(path: Path):
@@ -102,12 +111,16 @@ def load_config(path: str | Path) -> Configuration:
     rules = cfg.get("rules", {})
     if not isinstance(rules, dict):
         raise ValueError("rules must be a JSON object")
-    unknown_rules = set(rules) - {"wellness_shifts_per_week"}
+    unknown_rules = set(rules) - {"wellness_shifts_per_week", "max_evdt_als_shifts_per_week"}
     if unknown_rules:
         raise ValueError(f"Unsupported scheduling rules: {', '.join(sorted(unknown_rules))}")
     wellness_shifts_per_week = rules.get("wellness_shifts_per_week", 1)
     if type(wellness_shifts_per_week) is not int or not 1 <= wellness_shifts_per_week <= 5:
         raise ValueError("rules.wellness_shifts_per_week must be an integer from 1 to 5")
+    max_evdt_als_shifts_per_week = rules.get("max_evdt_als_shifts_per_week")
+    if max_evdt_als_shifts_per_week is not None and (
+            type(max_evdt_als_shifts_per_week) is not int or not 1 <= max_evdt_als_shifts_per_week <= 7):
+        raise ValueError("rules.max_evdt_als_shifts_per_week must be an integer from 1 to 7")
 
     hours = cfg.get("hours", {})
     caps = HourCaps(hours.get("ambulance_emt", 18), hours.get("campus_emt", 6), hours.get("campus_bert", 9))
@@ -170,6 +183,7 @@ def load_config(path: str | Path) -> Configuration:
             raise ValueError(f"Locked campus block is inactive: {key}")
         locks.append(LockedAssignment(item["email"].strip().lower(), key))
 
+    custom_priorities = validate_custom_priorities(cfg.get("custom_priorities", []))
     master = cfg.get("master_schedule_export", {})
     return Configuration(
         dates, providers, campus_keys, wellness_keys, wellness_capacity, caps, capacity, float(time_limit), workers,
@@ -179,7 +193,9 @@ def load_config(path: str | Path) -> Configuration:
         local_path(master.get("path", "outputs/master_schedule.csv")) if master.get("enabled", True) else None,
         master.get("block", ""), int(master.get("daynum_start", dates[0].month * 100 + dates[0].day)),
         overrides, locks,
-        validate_objective_order(cfg.get("objective_order", DEFAULT_OBJECTIVE_ORDER)),
+        validate_objective_order(cfg.get("objective_order", DEFAULT_OBJECTIVE_ORDER), custom_priorities),
         wellness_shifts_per_week,
         normalized_forces,
+        custom_priorities,
+        max_evdt_als_shifts_per_week,
     )

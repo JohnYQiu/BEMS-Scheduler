@@ -13,7 +13,7 @@ from models import (
     LockedAssignment, Schedule, ShiftKey, SolveStage, Volunteer,
     WEEKEND_PRIORITY_LABELS, ambulance_capacity, weekend_priority,
 )
-from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, validate_objective_order
+from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, validate_custom_priorities, validate_objective_order
 
 
 def _present(model, variables, name):
@@ -33,6 +33,45 @@ def _at_least(model, variables, minimum, name):
     return enough
 
 
+def _matches_member(person, selected):
+    """Match a form-derived role/driver status; never alter eligibility."""
+    if selected == "any":
+        return True
+    if selected == "driver":
+        return person.is_driver
+    if selected == "evdt":
+        return person.is_evdt
+    if selected == "auth":
+        return person.certification == "Auth"
+    if selected == "non_driver":
+        return not person.is_driver
+    if selected == "emt":
+        return isinstance(person, Volunteer)
+    return not isinstance(person, Volunteer)  # validated value: bert
+
+
+def _custom_objective(model, rule, people, providers, by_service):
+    """Build a soft expression from supported, validated assignment filters."""
+    terms = []
+    for key, entries in by_service[rule["service"]].items():
+        if rule["weekdays"] and key[0].weekday() not in rule["weekdays"]:
+            continue
+        if rule["shifts"] and key[1] not in rule["shifts"]:
+            continue
+        if rule["service"] == "ambulance" and rule["provider"] != "any" and providers[key] != rule["provider"]:
+            continue
+        selected = [var for pi, var in entries if _matches_member(people[pi], rule["member_filter"])]
+        if rule["metric"] == "covered_shifts":
+            terms.append(_present(model, selected, f"{rule['id']}_{key[0]}_{key[1]}"))
+        elif rule["metric"] == "hours":
+            hours = CAMPUS_BLOCK_HOURS if rule["service"] == "campus" else SHIFT_HOURS[key[1]]
+            terms.extend(hours * var for var in selected)
+        else:
+            terms.extend(selected)
+    expression = sum(terms)
+    return -expression if rule["direction"] == "minimize" else expression
+
+
 def _optimize(model, objectives, time_limit_s, workers):
     """Preserve each stage's best result; share one time budget across stages.
 
@@ -41,8 +80,9 @@ def _optimize(model, objectives, time_limit_s, workers):
     """
     deadline = monotonic() + time_limit_s
     stages, values = [], None
-    active = [(name, expr) for name, expr in objectives if not isinstance(expr, int)]
-    for i, (name, objective) in enumerate(active):
+    active = [(stage[0], stage[1], stage[2] if len(stage) == 3 else "maximize")
+              for stage in objectives if not isinstance(stage[1], int)]
+    for i, (name, objective, direction) in enumerate(active):
         remaining = deadline - monotonic()
         if remaining <= 0:
             stages.append(SolveStage(name, "NOT_RUN", None, None, 0))
@@ -61,8 +101,11 @@ def _optimize(model, objectives, time_limit_s, workers):
             stages.append(SolveStage(name, status_name, None, None, solver.wall_time))
             break
         value = int(solver.value(objective))
-        stages.append(SolveStage(name, status_name, value,
-                                 solver.best_objective_bound, solver.wall_time))
+        # The model maximizes -count for minimization. Report the real count and
+        # a lower bound rather than a confusing negative score/bound.
+        display_sign = -1 if direction == "minimize" else 1
+        stages.append(SolveStage(name, status_name, display_sign * value,
+                                 display_sign * solver.best_objective_bound, solver.wall_time))
         values = [solver.value(model.get_int_var_from_proto_index(j))
                   for j in range(len(model.proto.variables))]
         model.add(objective == value)
@@ -93,9 +136,12 @@ def solve_schedule(
     wellness_capacity: int = 1,
     objective_order: list[str] | tuple[str, ...] | None = None,
     wellness_shifts_per_week: int = 1,
+    custom_priorities: list[dict] | tuple[dict, ...] | None = None,
+    max_evdt_als_shifts_per_week: int | None = None,
 ) -> Schedule:
+    custom_priorities = validate_custom_priorities(custom_priorities or ())
     objective_order = validate_objective_order(
-        DEFAULT_OBJECTIVE_ORDER if objective_order is None else objective_order)
+        DEFAULT_OBJECTIVE_ORDER if objective_order is None else objective_order, custom_priorities)
     if time_limit_s <= 0 or type(workers) is not int or workers < 1:
         raise ValueError("Solver time budget and worker count must be positive")
     if type(campus_capacity) is not int or campus_capacity < 1:
@@ -104,6 +150,9 @@ def solve_schedule(
         raise ValueError("wellness_capacity must be a positive integer")
     if type(wellness_shifts_per_week) is not int or not 1 <= wellness_shifts_per_week <= 5:
         raise ValueError("wellness_shifts_per_week must be an integer from 1 to 5")
+    if max_evdt_als_shifts_per_week is not None and (
+            type(max_evdt_als_shifts_per_week) is not int or not 1 <= max_evdt_als_shifts_per_week <= 7):
+        raise ValueError("max_evdt_als_shifts_per_week must be an integer from 1 to 7")
     if any(kind not in ("ALS", "BLS") for kind in providers.values()):
         raise ValueError("Every ambulance shift must explicitly specify ALS or BLS")
     people = sorted(people, key=lambda p: p.email)
@@ -167,6 +216,14 @@ def solve_schedule(
                 weekly_wellness[monday].append(var)
         for entries in weekly_wellness.values():
             model.add(sum(entries) <= wellness_shifts_per_week)
+        if max_evdt_als_shifts_per_week is not None and isinstance(person, Volunteer) and person.is_evdt:
+            weekly_als = defaultdict(list)
+            for key, var in assignments:
+                if (pi, key) in x and providers[key] == "ALS":
+                    monday = key[0] - timedelta(days=key[0].weekday())
+                    weekly_als[monday].append(var)
+            for entries in weekly_als.values():
+                model.add(sum(entries) <= max_evdt_als_shifts_per_week)
         for d, entries in days.items():
             occupied = []
             for hour in (7, 10, 13, 16):
@@ -251,6 +308,13 @@ def solve_schedule(
     if any(name != OBJECTIVE_LABELS[identifier]
            for identifier, (name, _) in objective_by_id.items()):
         raise RuntimeError("Objective IDs and solver stages are out of sync")
+    by_service = {"ambulance": amb_by_key, "campus": cr_by_key, "wellness": wellness_by_key}
+    for rule in custom_priorities:
+        objective_by_id[rule["id"]] = (
+            f"Custom ({rule['direction']}): {rule['label']} [{rule['id']}]",
+            _custom_objective(model, rule, people, providers, by_service),
+            rule["direction"],
+        )
     objectives = [objective_by_id[identifier] for identifier in objective_order]
     values, stages = _optimize(model, objectives, time_limit_s, workers)
     result = Schedule(

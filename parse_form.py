@@ -107,8 +107,18 @@ def _block_tokens(cell: str) -> list[str]:
     return [t for t in _tokens(cell, r"\b([ABCD])\b") if t in CAMPUS_BLOCKS]
 
 
-def normalise_driver(raw: str) -> str:
-    r = (raw or "").strip().upper()
+def normalise_driver(raw: str, *, strict: bool = False) -> str:
+    r = " ".join((raw or "").strip().upper().split())
+    if strict:
+        # Driver-dependent policies must not infer credentials from fragments
+        # such as "not authorized" or from an absent form answer.
+        if r in ("EVDT", "EVDT DRIVER"):
+            return "EVDT"
+        if r in ("AUTH", "AUTHORIZED", "AUTHORIZED DRIVER", "AUTHORIZED - UTILITY 1"):
+            return "Auth"
+        if r in ("EMT", "NOT A DRIVER", "NON-DRIVER", "NO", "NONE"):
+            return "EMT"
+        raise ValueError(f"Unrecognized Driver Status {raw!r}; correct the form export or provide a driver status override")
     if "EVDT" in r:
         return "EVDT"
     if "AUTH" in r:
@@ -404,6 +414,7 @@ def load_all_responses(
     block_start: date,
     block_end: date,
     driver_status_overrides: Optional[dict[str, str]] = None,
+    require_driver_status: bool = False,
 ) -> tuple[list[Volunteer], list[BertMember]]:
     path = Path(csv_path)
     if path.suffix.lower() == ".zip":
@@ -424,6 +435,8 @@ def load_all_responses(
     year = block_start.year
     if maps["idx_email"] < 0 or maps["idx_role"] < 0:
         raise ValueError("Response CSV must contain an email and role column")
+    if require_driver_status and maps["idx_driver"] < 0:
+        raise ValueError("Driver-dependent policy requires a Driver Status column in the response CSV")
     if not any(maps[k] for k in ("emt_day", "emt_night", "emt_weekend", "emt_week", "bert")):
         raise ValueError("No scheduling columns match the configured block dates")
 
@@ -462,9 +475,8 @@ def load_all_responses(
             first_name=_safe(row, maps["idx_emt_first"]),
             last_name=_safe(row, maps["idx_emt_last"]),
             email=email,
-            certification=driver_status_overrides.get(
-                email, normalise_driver(_safe(row, maps["idx_driver"]))
-            ),
+            certification=(driver_status_overrides[email] if email in driver_status_overrides else
+                           normalise_driver(_safe(row, maps["idx_driver"]), strict=require_driver_status)),
             available=available,
             blackout_slots=blackout_slots,
             blackout_dates=blackout_dates,

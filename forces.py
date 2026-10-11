@@ -11,7 +11,8 @@ from parse_form import load_all_responses
 
 def load_volunteers(config):
     volunteers, _ = load_all_responses(
-        config.form_csv, config.dates[0], config.dates[-1], config.overrides)
+        config.form_csv, config.dates[0], config.dates[-1], config.overrides,
+        require_driver_status=config.requires_driver_status)
     return volunteers
 
 
