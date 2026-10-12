@@ -69,7 +69,7 @@ setup_environment() {
 # standalone runtime in this user's Application Support folder. This does not
 # modify macOS, PATH, shell profiles, or require administrator privileges.
 ensure_private_python() {
-  local machine arch filename url checksum runtime_parent runtime_dir temp_dir version
+  local machine arch filename url checksum runtime_parent runtime_dir temp_dir
   machine=$(uname -m)
   case "$machine" in
     arm64|aarch64) arch='aarch64' ;;
@@ -154,10 +154,9 @@ if (( installed == 0 )); then
   setup_environment "$PRIVATE_PYTHON" || fail 'Python is ready, but the pinned binary dependencies could not be installed. Check the pip messages above and retry when the package index is reachable.'
 fi
 
-# A venv created under the staging pathname contains that pathname in entry-point scripts;
-# Python itself is relocatable for this project, but recreate after moving to ensure stable paths.
-# Instead install at a unique final directory? Rebuild the environment there would expose partial state.
-# The launcher invokes .venv/bin/python directly; this path is valid after moving on macOS.
+# venv console-script shebangs retain the staging path, so launchers and documented
+# commands invoke .venv/bin/python directly. The base Python stays at a stable path,
+# including the private runtime under Application Support when bootstrap was needed.
 [[ ! -e "$target" && ! -L "$target" ]] || fail "Destination appeared during setup: $target. Nothing was overwritten."
 # macOS mv -n refuses to replace a newly appeared target; check stage existence to detect a race.
 mv -n -- "$stage" "$target" || fail 'Could not move the prepared project into place.'
