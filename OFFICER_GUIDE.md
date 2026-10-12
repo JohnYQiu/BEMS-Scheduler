@@ -46,6 +46,6 @@ A **priority** is a preference among valid schedules. The solver tries the top g
 
 ## Installation
 
-On macOS, after obtaining the project folder from a trusted source, double-click **Install on Desktop.command** in that folder. It copies the scheduler to a new Desktop folder, installs pinned Python dependencies in a local virtual environment, and creates desktop launchers. It does not overwrite an existing installation or fetch the scheduler from the internet. Installing dependencies requires an internet connection and a compatible Python installation. Follow the installer's messages if a prerequisite is missing.
+On macOS, after obtaining the project folder from a trusted source, double-click **Install on Desktop.command** in that folder. It copies the scheduler to a new Desktop folder, installs pinned Python dependencies in a local virtual environment, and creates desktop launchers. If Python 3.11–3.13 is not already available, it downloads Python 3.13.16 for the Mac's processor, verifies the archive's pinned SHA-256 checksum, and installs that private runtime under the user's `~/Library/Application Support/BEMS Scheduler/` folder. No administrator access, system-wide changes, or shell-profile edits are made. Internet access is required for the Python runtime when needed and for the pinned binary packages. The installer does not fetch the scheduler itself and never overwrites an existing Desktop installation. Windows support is not included in this installer.
 
-For manual setup or troubleshooting, see the main [README](README.md). Windows support is not included in this installer yet.
+For manual setup or troubleshooting, see the main [README](README.md).
