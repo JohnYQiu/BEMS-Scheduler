@@ -372,11 +372,15 @@ the editor; that branch contains only the Terminal scheduler. It creates a separ
 `~/Desktop/BEMS Scheduler` folder, installs pinned dependencies in `.venv`,
 and places **Open BEMS Editor.command** and **Run Scheduler.command** launchers
 on the Desktop. It never overwrites an existing installation and does not copy
-private inputs or generated outputs. Python 3.11–3.13 and internet access for
-pinned package downloads are required; Windows needs manual setup. The installer
-has been tested on a Mac with Python 3.11 via Terminal, including dependency
-installation and a repeat-run no-overwrite check. Finder/Gatekeeper behavior on a
-fresh Mac still needs a separate trial.
+private inputs or generated outputs. If it cannot find Python 3.11–3.13, it
+installs a pinned Python 3.13.16 runtime under `~/Library/Application Support/BEMS Scheduler/`
+for this user only. The runtime archive is SHA-256 verified before extraction;
+there is no `sudo`, system-wide Python install, or shell-profile change. Internet
+access is needed for the runtime (when needed) and pinned binary packages.
+Windows needs manual setup. The installer has been tested on macOS with and
+without a preinstalled supported Python, including dependency installation and a
+repeat-run no-overwrite check. Finder/Gatekeeper behavior on a fresh Mac still
+needs a separate trial.
 See [OFFICER_GUIDE.md](OFFICER_GUIDE.md) for a nontechnical explanation of
 sources, constraints, priorities, forced crews, and review steps.
 
