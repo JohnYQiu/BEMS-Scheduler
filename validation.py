@@ -4,13 +4,15 @@ from collections import defaultdict
 from datetime import timedelta
 
 from models import HourCaps, Schedule, Volunteer, ambulance_capacity, interval, SHIFT_HOURS
+from policy import validate_hard_requirements, _hard_requirement_member_match
 
 
 def validate_schedule(schedule: Schedule, people, providers, campus_keys,
                       caps: HourCaps, campus_capacity: int, locks=(),
                       wellness_keys=(), wellness_capacity: int = 1,
                       wellness_shifts_per_week: int = 1,
-                      max_evdt_als_shifts_per_week: int | None = None) -> list[str]:
+                      max_evdt_als_shifts_per_week: int | None = None,
+                      hard_requirements=()) -> list[str]:
     errors = []
     roster = {p.email: p for p in people}
     if len(roster) != len(people):
@@ -101,6 +103,18 @@ def validate_schedule(schedule: Schedule, people, providers, campus_keys,
                 run_start, run_end = start, end
             if run_end - run_start > timedelta(hours=12):
                 errors.append(f"{p.full_name}: more than 12 continuous hours ending {run_end}")
+    for rule in validate_hard_requirements(hard_requirements):
+        assignments = schedule.ambulance if rule["service"] == "ambulance" else schedule.campus
+        for key, assigned in assignments.items():
+            if rule["weekdays"] and key[0].weekday() not in rule["weekdays"]:
+                continue
+            if rule["shifts"] and key[1] not in rule["shifts"]:
+                continue
+            if rule["service"] == "ambulance" and rule["provider"] != "any" and providers[key] != rule["provider"]:
+                continue
+            count = sum(_hard_requirement_member_match(person, rule["member_filter"]) for person in assigned)
+            if count < rule["min_people"]:
+                errors.append(f"{key}: hard requirement '{rule['label']}' requires {rule['min_people']} matching people; got {count}")
     for lock in locks:
         index = (amb_person if lock.key in schedule.ambulance else
                  cr_person if lock.key in schedule.campus else wellness_person)

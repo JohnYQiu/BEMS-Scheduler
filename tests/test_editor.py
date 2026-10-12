@@ -64,6 +64,20 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(self.path.read_text())['solver_time_limit_s'], 30.5)
 
+    def test_hard_requirement_round_trips_through_local_editor(self):
+        version, submitted = self.submission()
+        rule = {'id': 'hard:driver', 'label': 'BLS weekend driver', 'service': 'ambulance',
+                'member_filter': 'driver', 'provider': 'BLS', 'weekdays': [4, 5],
+                'shifts': ['NIGHT'], 'min_people': 1}
+        submitted['hard_requirements'] = [rule]
+        editor.save_config(self.path, version, submitted)
+        from configuration import load_config
+        self.assertEqual(load_config(self.path).hard_requirements, (rule,))
+        version, submitted = self.submission()
+        submitted['hard_requirements'] = [{**rule, 'min_people': 5}]
+        with self.assertRaisesRegex(editor.EditorError, 'min_people must'):
+            editor.save_config(self.path, version, submitted)
+
     def test_supported_rule_can_be_added_and_removed(self):
         version, submitted = self.submission()
         submitted['optional_rules'] = {'/rules/wellness_shifts_per_week': 2}

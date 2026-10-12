@@ -6,7 +6,7 @@ from ortools.sat.python import cp_model
 
 from models import BertMember, HourCaps, LockedAssignment, Volunteer, is_big_weekend, weekend_priority
 from solver import _optimize, solve_schedule
-from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS
+from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, hard_requirement_warnings
 from validation import validate_schedule
 
 D = date(2026, 9, 21)
@@ -71,6 +71,33 @@ class SchedulingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ALS/BLS provider filters'):
             solve_schedule([other], {shift: 'BLS'}, [], custom_priorities=[{**custom, 'service': 'campus'}],
                            objective_order=order)
+
+    def test_hard_requirement_enforced_independently_and_warns_on_fragility(self):
+        shift = (D, 'AM')
+        driver = emt('Driver', 'EVDT', ambulance={shift})
+        req = dict(id='hard:driver', label='Require a driver', service='ambulance',
+                   member_filter='driver', provider='BLS', weekdays=[0], shifts=['AM'], min_people=1)
+        providers = {shift: 'BLS'}
+        warnings = hard_requirement_warnings([req], [driver], providers, [])
+        self.assertTrue(any('fragile' in warning and 'no backup' in warning for warning in warnings))
+        result = solve_schedule([driver], providers, [], HourCaps(6, 0, 9), time_limit_s=5,
+                                workers=1, hard_requirements=[req])
+        self.assertEqual(len(result.ambulance[shift]), 1)
+        self.assertEqual(validate_schedule(result, [driver], providers, [], HourCaps(6, 0, 9), 2,
+                                           hard_requirements=[req]), [])
+        impossible = {**req, 'min_people': 2}
+        warnings = hard_requirement_warnings([impossible], [driver], providers, [])
+        self.assertTrue(any('not individually feasible' in warning for warning in warnings))
+        over_capacity = {**req, 'min_people': 3}
+        capacity_warnings = hard_requirement_warnings([over_capacity], [driver], providers, [], 2)
+        self.assertTrue(any('shift capacity is 1' in warning for warning in capacity_warnings))
+        with self.assertRaisesRegex(RuntimeError, 'INFEASIBLE'):
+            solve_schedule([driver], providers, [], HourCaps(6, 0, 9), time_limit_s=5,
+                           workers=1, hard_requirements=[impossible])
+        result.ambulance[shift] = []
+        errors = validate_schedule(result, [driver], providers, [], HourCaps(6, 0, 9), 2,
+                                   hard_requirements=[req])
+        self.assertTrue(any("hard requirement 'Require a driver'" in error for error in errors))
 
     def test_custom_priority_weekday_filter_and_minimize(self):
         monday, tuesday = (D, 'AM'), (D + timedelta(days=1), 'AM')

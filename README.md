@@ -422,6 +422,8 @@ scripting language**. Minimize stages show the actual nonnegative count in the
 Solver tab, with a lower bound rather than an upper bound. A high-priority minimize goal can lower coverage, so inspect the
 Solver and Warnings tabs. More stages share the same solve time budget.
 
+The **Hard requirements** builder can require a minimum number of matching, available people on every selected ambulance or Campus Response shift. Choose service, member/driver filter, ALS/BLS, weekday, shift kind, and minimum 1–4. These are enforced by the solver and independent validator. Before solving, the scheduler warns when a matching shift has too few candidates, exactly enough candidates (no backup), or the rule matches no shifts. This is an availability-only screening check; hour caps, rest, forced crews, or interactions can still make a rule set infeasible. The solver is authoritative and stops without exporting if the full hard-rule set cannot be satisfied. Avoid turning a desirable goal into a hard requirement unless failing the whole schedule is acceptable.
+
 The **Supported rule library** includes the per-person weekly Wellness maximum
 (default one) and an optional weekly maximum on ALS assignments for each EVDT.
 The latter uses form-derived Driver Status and, if enabled, may leave ALS shifts

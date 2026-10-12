@@ -13,7 +13,8 @@ from models import (
     LockedAssignment, Schedule, ShiftKey, SolveStage, Volunteer,
     WEEKEND_PRIORITY_LABELS, ambulance_capacity, weekend_priority,
 )
-from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, validate_custom_priorities, validate_objective_order
+from policy import (DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, validate_custom_priorities,
+                    validate_hard_requirements, validate_objective_order)
 
 
 def _present(model, variables, name):
@@ -97,7 +98,7 @@ def _optimize(model, objectives, time_limit_s, workers):
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             if values is None or status in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID):
                 raise RuntimeError(f"Schedule solver failed at {name}: {status_name}. "
-                                   "Check locked assignments and increase the time budget if needed.")
+                                   "Check hard requirements and locked assignments, and increase the time budget if needed.")
             stages.append(SolveStage(name, status_name, None, None, solver.wall_time))
             break
         value = int(solver.value(objective))
@@ -138,8 +139,10 @@ def solve_schedule(
     wellness_shifts_per_week: int = 1,
     custom_priorities: list[dict] | tuple[dict, ...] | None = None,
     max_evdt_als_shifts_per_week: int | None = None,
+    hard_requirements: list[dict] | tuple[dict, ...] | None = None,
 ) -> Schedule:
     custom_priorities = validate_custom_priorities(custom_priorities or ())
+    hard_requirements = validate_hard_requirements(hard_requirements or ())
     objective_order = validate_objective_order(
         DEFAULT_OBJECTIVE_ORDER if objective_order is None else objective_order, custom_priorities)
     if time_limit_s <= 0 or type(workers) is not int or workers < 1:
@@ -191,6 +194,18 @@ def solve_schedule(
         model.add(sum(v for _, v in entries) <= campus_capacity)
     for entries in wellness_by_key.values():
         model.add(sum(v for _, v in entries) <= wellness_capacity)
+
+    requirement_calendars = {"ambulance": amb_by_key, "campus": cr_by_key}
+    for rule in hard_requirements:
+        for key, entries in requirement_calendars[rule["service"]].items():
+            if rule["weekdays"] and key[0].weekday() not in rule["weekdays"]:
+                continue
+            if rule["shifts"] and key[1] not in rule["shifts"]:
+                continue
+            if rule["service"] == "ambulance" and rule["provider"] != "any" and providers[key] != rule["provider"]:
+                continue
+            matching = [var for pi, var in entries if _matches_member(people[pi], rule["member_filter"])]
+            model.add(sum(matching) >= rule["min_people"])
 
     # A/B/C/D are occupancy segments, not mandatory assignment bundles.
     patterns = [(0, 0, 0, 0)] + [

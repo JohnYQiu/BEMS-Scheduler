@@ -12,6 +12,7 @@ from output import (export_master_schedule_csv, export_schedule_xlsx,
 from parse_form import load_all_responses
 from solver import solve_schedule
 from validation import validate_schedule
+from policy import hard_requirement_warnings
 
 
 def run(config_path, check_only=False):
@@ -21,6 +22,9 @@ def run(config_path, check_only=False):
         require_driver_status=config.requires_driver_status)
     people = volunteers + bert_members
     validate_forced_crews(config, volunteers)
+    for warning in hard_requirement_warnings(config.hard_requirements, people, config.providers,
+                                               config.campus_keys, config.campus_capacity):
+        print(f"HARD REQUIREMENT WARNING: {warning}")
     if not people:
         raise ValueError("No scheduling members found in the response CSV")
     print(f"Block: {config.dates[0]} to {config.dates[-1]}")
@@ -30,11 +34,12 @@ def run(config_path, check_only=False):
         config.campus_capacity, config.locks, config.time_limit_s, config.workers,
         config.wellness_keys, config.wellness_capacity, config.objective_order,
         config.wellness_shifts_per_week, config.custom_priorities,
-        config.max_evdt_als_shifts_per_week)
+        config.max_evdt_als_shifts_per_week, config.hard_requirements)
     errors = validate_schedule(
         schedule, people, config.providers, config.campus_keys, config.caps,
         config.campus_capacity, config.locks, config.wellness_keys, config.wellness_capacity,
-        config.wellness_shifts_per_week, config.max_evdt_als_shifts_per_week)
+        config.wellness_shifts_per_week, config.max_evdt_als_shifts_per_week,
+        config.hard_requirements)
     if errors:
         raise RuntimeError("Schedule failed validation; nothing exported:\n" + "\n".join(errors))
     print("All hard scheduling rules verified against the resulting assignments.")

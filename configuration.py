@@ -12,7 +12,8 @@ from models import (
     CAMPUS_BLOCKS, HourCaps, LockedAssignment, ShiftKey, ambulance_capacity, all_campus_keys,
     all_shift_keys, all_wellness_keys, block_dates, campus_ambulance_overlap, interval, is_weekend,
 )
-from policy import DEFAULT_OBJECTIVE_ORDER, validate_custom_priorities, validate_objective_order
+from policy import (DEFAULT_OBJECTIVE_ORDER, validate_custom_priorities,
+                    validate_hard_requirements, validate_objective_order)
 
 
 @dataclass
@@ -39,12 +40,13 @@ class Configuration:
     forced_crews: list[dict] = field(default_factory=list)
     custom_priorities: tuple[dict, ...] = ()
     max_evdt_als_shifts_per_week: int | None = None
+    hard_requirements: tuple[dict, ...] = ()
 
     @property
     def requires_driver_status(self) -> bool:
         return self.max_evdt_als_shifts_per_week is not None or any(
             item["member_filter"] in ("driver", "evdt", "auth", "non_driver")
-            for item in self.custom_priorities
+            for item in (*self.custom_priorities, *self.hard_requirements)
         )
 
 
@@ -184,6 +186,7 @@ def load_config(path: str | Path) -> Configuration:
         locks.append(LockedAssignment(item["email"].strip().lower(), key))
 
     custom_priorities = validate_custom_priorities(cfg.get("custom_priorities", []))
+    hard_requirements = validate_hard_requirements(cfg.get("hard_requirements", []))
     master = cfg.get("master_schedule_export", {})
     return Configuration(
         dates, providers, campus_keys, wellness_keys, wellness_capacity, caps, capacity, float(time_limit), workers,
@@ -198,4 +201,5 @@ def load_config(path: str | Path) -> Configuration:
         normalized_forces,
         custom_priorities,
         max_evdt_als_shifts_per_week,
+        hard_requirements,
     )
