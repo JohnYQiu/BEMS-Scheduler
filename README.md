@@ -8,9 +8,9 @@ Wellness Wagon can be enabled as a separate, manual-entry workbook. It never cha
 **Workflow: export responses → edit `config.json` → run → review the output.**
 The program reads a downloaded file. It does not connect to or update Google Sheets.
 
-This `feature/officer-editor` branch includes the local browser editor and macOS
-desktop installer alongside the scheduler with forced crews. The current Terminal
-scheduler without the editor is on [`main`](https://github.com/noahlangbo/BEMS-Scheduler),
+This `feature/custom-priorities` branch adds input-driven custom preferences and
+an optional weekly EVDT limit to the local browser editor and macOS installer.
+The stable Terminal scheduler without the editor is on [`main`](https://github.com/noahlangbo/BEMS-Scheduler),
 and the pre-forced-crew version remains on
 [`legacy-before-forces`](https://github.com/noahlangbo/BEMS-Scheduler/tree/legacy-before-forces).
 
@@ -23,7 +23,7 @@ If you already have this project, open Terminal in the `BEMS-Scheduler` folder
 To download a new copy:
 
 ```sh
-git clone --branch feature/officer-editor --single-branch https://github.com/noahlangbo/BEMS-Scheduler.git
+git clone --branch feature/custom-priorities --single-branch https://github.com/noahlangbo/BEMS-Scheduler.git
 cd BEMS-Scheduler
 ```
 
@@ -365,7 +365,7 @@ Run the existing checks after changing code:
 
 ## Local browser policy editor (optional)
 
-For a first-time macOS setup, open the `feature/officer-editor` branch on GitHub,
+For a first-time macOS setup, open the `feature/custom-priorities` branch on GitHub,
 choose **Code → Download ZIP**, extract the archive, then double-click
 **Install on Desktop.command** in its top-level folder. Do not download `main` for
 the editor; that branch contains only the Terminal scheduler. It creates a separate
