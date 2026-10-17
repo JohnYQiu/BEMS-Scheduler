@@ -49,6 +49,16 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(any('multiple seats' in e for e in errors))
         self.assertTrue(any('totals' in e for e in errors))
 
+    def test_checker_allows_two_bls_crew_members_without_volunteer_driver(self):
+        shift = (D, 'AM')
+        people = [Volunteer(str(i), 'Crew', f'{i}@example.com', available={shift})
+                  for i in range(2)]
+        for person in people:
+            person.assigned = [shift]
+        errors = validate_schedule(Schedule({shift: people}, {}), people,
+                                   {shift: 'BLS'}, [], HourCaps(), 2)
+        self.assertEqual(errors, [])
+
 
 class OutputTests(unittest.TestCase):
     def export(self, schedule, providers, capacity=2):
@@ -66,7 +76,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual([(r['Vehicle'], r['Seat'], r['Requires'], r['Assigned/Name']) for r in rows],
                          [('R1', 'Driver', 'AUTH', 'Auth Person'),
                           ('R1', 'C2', 'CREW', 'Crew Person'),
-                          ('R1', 'C3', 'CREW', '')])
+                          ('R1', 'C3', 'CREW', ''), ('R1', 'C4', 'CREW', '')])
 
     def test_bls_evdt_is_driver_ahead_of_auth(self):
         key = (D + timedelta(days=4), 'NIGHT')
@@ -75,14 +85,15 @@ class OutputTests(unittest.TestCase):
         rows = self.export(Schedule({key: [auth, evdt]}, {}), {key: 'BLS'})
         self.assertEqual([(r['Seat'], r['Requires'], r['Assigned/Name']) for r in rows],
                          [('Driver', 'EVDT', 'EVDT Person'),
-                          ('C2', 'CREW', 'Auth Person'), ('C3', 'CREW', '')])
+                          ('C2', 'CREW', 'Auth Person'), ('C3', 'CREW', ''),
+                          ('C4', 'CREW', '')])
 
     def test_export_matches_live_v3_header_and_uses_calendar_date_in_id(self):
         key = (date(2026, 10, 1), 'NIGHT')
         rows = self.export(Schedule({key: []}, {}), {key: 'BLS'})
         self.assertEqual(list(rows[0].keys()),
                          ['ShiftID', 'Date', 'Shift', 'Vehicle', 'Seat', 'Requires', 'Assigned/Name'])
-        self.assertEqual(rows[0]['ShiftID'], 'F26B2-1001-NIGHT-R1-C2')
+        self.assertEqual(rows[0]['ShiftID'], 'F26B2-1001-NIGHT-R1-AUTH')
 
     def test_als_keeps_evdt_truck_seat_open_when_only_auth_available(self):
         key = (D, 'AM')
@@ -96,7 +107,21 @@ class OutputTests(unittest.TestCase):
         person = Volunteer('One', 'EMT', 'one@example.com')
         rows = self.export(Schedule({key: [person]}, {}), {key: 'BLS'})
         self.assertEqual([(r['Vehicle'], r['Seat'], r['Requires'], r['Assigned/Name']) for r in rows],
-                         [('R1', 'C2', 'CREW', 'One EMT')])
+                         [('R1', 'Driver', 'AUTH', ''), ('R1', 'C2', 'CREW', 'One EMT')])
+
+    def test_weekday_bls_driver_keeps_open_c2_row(self):
+        key = (D, 'PM')
+        driver = Volunteer('Driver', 'Auth', 'driver@example.com', 'Auth')
+        rows = self.export(Schedule({key: [driver]}, {}), {key: 'BLS'})
+        self.assertEqual([(r['Seat'], r['Requires'], r['Assigned/Name']) for r in rows],
+                         [('Driver', 'AUTH', 'Driver Auth'), ('C2', 'CREW', '')])
+
+    def test_weekday_bls_uses_driver_seat_for_crew_only_when_full(self):
+        key = (D, 'AM')
+        crew = [Volunteer(f'Crew{i}', 'Person', f'crew{i}@example.com') for i in (1, 2)]
+        rows = self.export(Schedule({key: crew}, {}), {key: 'BLS'})
+        self.assertEqual([(r['Seat'], r['Requires'], r['Assigned/Name']) for r in rows],
+                         [('Driver', 'CREW', 'Crew1 Person'), ('C2', 'CREW', 'Crew2 Person')])
 
     def test_als_weekend_keeps_evdt_driver_and_numbers_crew_from_c2(self):
         key = (D + timedelta(days=4), 'NIGHT')
@@ -140,6 +165,29 @@ class OutputTests(unittest.TestCase):
             self.assertEqual(wb.sheetnames, ['Schedule', 'Campus Response', 'Hour Summary', 'Warnings', 'Solver'])
             self.assertEqual(wb['Hour Summary']['I2'].value, 18)
             self.assertEqual(wb['Hour Summary']['J2'].value, 6)
+            wb.close()
+
+    def test_campus_view_labels_blocks_and_includes_the_following_week(self):
+        first_monday = date(2026, 10, 12)
+        last_friday = date(2026, 10, 23)
+        campus = {
+            (first_monday + timedelta(days=offset), block): []
+            for offset in range((last_friday - first_monday).days + 1)
+            if (first_monday + timedelta(days=offset)).weekday() < 5
+            for block in ('A', 'B', 'C', 'D')
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = export_schedule_xlsx(Schedule({}, campus), [], {}, HourCaps(),
+                                        Path(tmp) / 'schedule.xlsx')
+            wb = load_workbook(path)
+            ws = wb['Campus Response']
+            labels = {ws.cell(row=row, column=1).value for row in range(1, ws.max_row + 1)}
+            self.assertIn('A\n0700-1000', labels)
+            self.assertIn('B\n1000-1300', labels)
+            self.assertIn('C\n1300-1600', labels)
+            self.assertIn('D\n1600-1900', labels)
+            week_headers = [ws.cell(row=row, column=1).value for row in range(1, ws.max_row + 1)]
+            self.assertIn('Week of 2026-10-18 (Sun–Sat)', week_headers)
             wb.close()
 
 

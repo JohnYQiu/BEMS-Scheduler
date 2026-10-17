@@ -324,9 +324,11 @@ def _ambulance_seats(key, people, provider):
     """Place volunteer drivers before crew, matching Scheduler V3 seat rows.
 
     ALS always preserves an EVDT-only Driver seat, even if it stays open; an
-    Auth then occupies C2 or later. On BLS, an EVDT takes Driver first, then
-    an Auth; if neither is assigned, volunteers fill crew seats and the
-    supervisor is the fallback driver. Capacity counts people, not empty seats.
+    Auth then occupies C2 or later. BLS always preserves a Driver row (AUTH
+    when open); an assigned EVDT takes Driver first, then an Auth. If needed
+    to fill the schedule, a non-driver may use that row as a CREW override;
+    the supervisor remains the fallback driver. Capacity counts volunteer
+    seats, including the Driver row.
     """
     remaining = sorted(people, key=lambda p: p.full_name)
     seats = []
@@ -339,11 +341,15 @@ def _ambulance_seats(key, people, provider):
         driver = next((p for p in remaining if p.is_evdt), None)
         if driver is None:
             driver = next((p for p in remaining if p.certification == "Auth"), None)
-        if driver is not None:
-            seats.append(("R1", "Driver", driver.certification.upper(), driver))
+        seats.append(("R1", "Driver", driver.certification.upper() if driver else "AUTH", driver))
     if driver is not None:
         remaining.remove(driver)
-    crew_slots = cap - (1 if driver is not None or provider == "ALS" else 0)
+    crew_slots = cap - 1
+    if provider == "BLS" and driver is None and len(remaining) > crew_slots:
+        # Intentional fallback only when the regular crew seats would
+        # otherwise be exceeded. This is a seat override, not driver status;
+        # the supervisor remains the fallback driver.
+        seats[0] = ("R1", "Driver", "CREW", remaining.pop(0))
     for i in range(crew_slots):
         person = remaining[i] if i < len(remaining) else None
         seats.append(("R1", f"C{i + 2}", "CREW", person))

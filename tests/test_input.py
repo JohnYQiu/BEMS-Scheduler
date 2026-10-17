@@ -209,8 +209,8 @@ class InputTests(unittest.TestCase):
             path.write_text(json.dumps(cfg))
             with contextlib.redirect_stdout(io.StringIO()):
                 schedule = run(path, check_only=True)
-            self.assertEqual([p.email for p in schedule.ambulance[(D, 'AM')]],
-                             ['driver@example.com'])
+            self.assertEqual({p.email for p in schedule.ambulance[(D, 'AM')]},
+                             {'driver@example.com', 'other@example.com'})
             self.assertEqual(schedule.stages[0].value, 1)
 
     def test_forced_crew_is_required_and_respects_hours_and_availability(self):
