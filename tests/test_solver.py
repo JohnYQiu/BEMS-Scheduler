@@ -6,6 +6,7 @@ from ortools.sat.python import cp_model
 
 from models import BertMember, HourCaps, LockedAssignment, Volunteer, is_big_weekend, weekend_priority
 from solver import _optimize, solve_schedule
+from policy import DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, hard_requirement_warnings
 from validation import validate_schedule
 
 D = date(2026, 9, 21)
@@ -17,15 +18,151 @@ def emt(name="Person", cert="EMT", ambulance=(), campus=()):
 
 
 class SchedulingTests(unittest.TestCase):
-    def solve(self, people, providers=None, campus=None, caps=HourCaps(), locks=()):
+    def solve(self, people, providers=None, campus=None, caps=HourCaps(), locks=(), wellness=(), wellness_capacity=1):
         if providers is None:
             providers = {k: "BLS" for p in people for k in getattr(p, "available", ())}
         if campus is None:
             campus = sorted({k for p in people for k in p.campus_available})
-        result = solve_schedule(people, providers, campus, caps, 2, list(locks), 5, 1)
-        self.assertEqual(validate_schedule(result, people, providers, campus, caps, 2, locks), [])
+        result = solve_schedule(people, providers, campus, caps, 2, list(locks), 5, 1,
+                                list(wellness), wellness_capacity)
+        self.assertEqual(validate_schedule(result, people, providers, campus, caps, 2, locks,
+                                           wellness, wellness_capacity), [])
         self.assertTrue(all(s.status == "OPTIMAL" for s in result.stages))
         return result
+
+    def test_default_priority_stages_and_configured_reordering(self):
+        ambulance, campus = (D, 'AM'), (D, 'A')
+        providers = {ambulance: 'BLS'}
+        p = emt(ambulance={ambulance}, campus={campus})
+        default = solve_schedule([p], providers, [campus], HourCaps(6, 3, 9),
+                                 2, [], 5, 1)
+        expected = [OBJECTIVE_LABELS[id] for id in DEFAULT_OBJECTIVE_ORDER]
+        self.assertEqual([stage.name for stage in default.stages],
+                         [name for name in expected if name in {s.name for s in default.stages}])
+        self.assertEqual(p.assigned, [ambulance])
+        self.assertEqual(validate_schedule(default, [p], providers, [campus],
+                                           HourCaps(6, 3, 9), 2), [])
+        reordered = ('campus_coverage',) + tuple(
+            id for id in DEFAULT_OBJECTIVE_ORDER if id != 'campus_coverage')
+        changed = solve_schedule([p], providers, [campus], HourCaps(6, 3, 9),
+                                 2, [], 5, 1, objective_order=reordered)
+        self.assertEqual(changed.stages[0].name, OBJECTIVE_LABELS['campus_coverage'])
+        self.assertEqual(p.campus_assigned, [campus])
+        self.assertEqual(p.assigned, [])
+        self.assertEqual(validate_schedule(changed, [p], providers, [campus],
+                                           HourCaps(6, 3, 9), 2), [])
+        with self.assertRaisesRegex(ValueError, 'exactly once'):
+            solve_schedule([p], providers, [campus], objective_order=['campus_coverage'])
+
+    def test_custom_driver_priority_changes_choice_without_changing_constraints(self):
+        shift = (D, 'AM')
+        driver = emt('Driver', 'EVDT', ambulance={shift})
+        other = emt('Other', 'EMT', ambulance={shift})
+        custom = dict(id='custom:driver-choice', label='Driver on day shift',
+                      service='ambulance', metric='assignments', member_filter='driver',
+                      provider='BLS', weekdays=[0], shifts=['AM'], direction='maximize')
+        order = (custom['id'], *DEFAULT_OBJECTIVE_ORDER)
+        result = solve_schedule([other, driver], {shift: 'BLS'}, [], HourCaps(6, 0, 9),
+                                time_limit_s=5, workers=1, objective_order=order,
+                                custom_priorities=[custom])
+        self.assertEqual([p.email for p in result.ambulance[shift]], [driver.email])
+        self.assertEqual(result.stages[0].name, 'Custom (maximize): Driver on day shift [custom:driver-choice]')
+        self.assertEqual(validate_schedule(result, [other, driver], {shift: 'BLS'}, [], HourCaps(6, 0, 9), 2), [])
+        with self.assertRaisesRegex(ValueError, 'ALS/BLS provider filters'):
+            solve_schedule([other], {shift: 'BLS'}, [], custom_priorities=[{**custom, 'service': 'campus'}],
+                           objective_order=order)
+
+    def test_hard_requirement_enforced_independently_and_warns_on_fragility(self):
+        shift = (D, 'AM')
+        driver = emt('Driver', 'EVDT', ambulance={shift})
+        req = dict(id='hard:driver', label='Require a driver', service='ambulance',
+                   member_filter='driver', provider='BLS', weekdays=[0], shifts=['AM'], min_people=1)
+        providers = {shift: 'BLS'}
+        warnings = hard_requirement_warnings([req], [driver], providers, [])
+        self.assertTrue(any('fragile' in warning and 'no backup' in warning for warning in warnings))
+        result = solve_schedule([driver], providers, [], HourCaps(6, 0, 9), time_limit_s=5,
+                                workers=1, hard_requirements=[req])
+        self.assertEqual(len(result.ambulance[shift]), 1)
+        self.assertEqual(validate_schedule(result, [driver], providers, [], HourCaps(6, 0, 9), 2,
+                                           hard_requirements=[req]), [])
+        impossible = {**req, 'min_people': 2}
+        warnings = hard_requirement_warnings([impossible], [driver], providers, [])
+        self.assertTrue(any('not individually feasible' in warning for warning in warnings))
+        over_capacity = {**req, 'min_people': 3}
+        capacity_warnings = hard_requirement_warnings([over_capacity], [driver], providers, [], 2)
+        self.assertTrue(any('shift capacity is 1' in warning for warning in capacity_warnings))
+        with self.assertRaisesRegex(RuntimeError, 'INFEASIBLE'):
+            solve_schedule([driver], providers, [], HourCaps(6, 0, 9), time_limit_s=5,
+                           workers=1, hard_requirements=[impossible])
+        result.ambulance[shift] = []
+        errors = validate_schedule(result, [driver], providers, [], HourCaps(6, 0, 9), 2,
+                                   hard_requirements=[req])
+        self.assertTrue(any("hard requirement 'Require a driver'" in error for error in errors))
+
+    def test_custom_priority_weekday_filter_and_minimize(self):
+        monday, tuesday = (D, 'AM'), (D + timedelta(days=1), 'AM')
+        p = emt('One', 'Auth', ambulance={monday, tuesday})
+        custom = dict(id='custom:tuesday', label='Avoid Tuesday drivers',
+                      service='ambulance', metric='hours', member_filter='auth',
+                      provider='any', weekdays=[1], shifts=[], direction='minimize')
+        order = (custom['id'], *DEFAULT_OBJECTIVE_ORDER)
+        result = solve_schedule([p], {monday: 'BLS', tuesday: 'BLS'}, [], HourCaps(6, 0, 9),
+                                time_limit_s=5, workers=1, objective_order=order,
+                                custom_priorities=[custom])
+        self.assertEqual(p.assigned, [monday])
+        self.assertEqual(result.stages[0].name, 'Custom (minimize): Avoid Tuesday drivers [custom:tuesday]')
+        self.assertEqual(result.stages[0].value, 0)
+        self.assertGreaterEqual(result.stages[0].bound, 0)
+        self.assertEqual(validate_schedule(result, [p], {monday: 'BLS', tuesday: 'BLS'}, [],
+                                           HourCaps(6, 0, 9), 2), [])
+
+    def test_input_derived_evdt_weekly_als_limit(self):
+        monday, wednesday = (D, 'AM'), (D + timedelta(days=2), 'AM')
+        provider = {monday: 'ALS', wednesday: 'ALS'}
+        p = emt('Driver', 'EVDT', ambulance={monday, wednesday})
+        default = solve_schedule([p], provider, [], time_limit_s=5, workers=1)
+        self.assertEqual(len(p.assigned), 2)
+        self.assertTrue(any('more than 1 ALS shift' in e for e in
+                            validate_schedule(default, [p], provider, [], HourCaps(), 2,
+                                              max_evdt_als_shifts_per_week=1)))
+        limited = solve_schedule([p], provider, [], time_limit_s=5, workers=1,
+                                 max_evdt_als_shifts_per_week=1)
+        self.assertEqual(len(p.assigned), 1)
+        self.assertEqual(validate_schedule(limited, [p], provider, [], HourCaps(), 2,
+                                           max_evdt_als_shifts_per_week=1), [])
+
+    def test_wellness_is_lower_priority_than_ambulance_hours(self):
+        ambulance, wellness = (D, 'AM'), (D, 'WAM')
+        p = emt(ambulance={ambulance})
+        p.wellness_available = {wellness}
+        result = self.solve([p], {ambulance: 'BLS'}, caps=HourCaps(6, 0, 9), wellness={wellness})
+        self.assertEqual(p.assigned, [ambulance])
+        self.assertEqual(result.wellness[wellness], [])
+
+    def test_supported_weekly_wellness_rule_changes_limit_without_changing_default(self):
+        first, second = (D, 'WAM'), (D + timedelta(days=2), 'WAM')
+        p = emt()
+        p.wellness_available = {first, second}
+        default = solve_schedule([p], {}, [], wellness_keys=[first, second],
+                                 time_limit_s=5, workers=1)
+        self.assertEqual(sum(bool(default.wellness[k]) for k in (first, second)), 1)
+        configured = solve_schedule([p], {}, [], wellness_keys=[first, second],
+                                    time_limit_s=5, workers=1,
+                                    wellness_shifts_per_week=2)
+        self.assertEqual(sum(bool(configured.wellness[k]) for k in (first, second)), 2)
+        self.assertEqual(validate_schedule(configured, [p], {}, [], HourCaps(), 2,
+                                           wellness_keys=[first, second], wellness_shifts_per_week=2), [])
+        self.assertTrue(any('more than 1 Wellness' in e for e in
+                            validate_schedule(configured, [p], {}, [], HourCaps(), 2,
+                                              wellness_keys=[first, second])))
+
+    def test_wellness_is_limited_to_one_shift_per_week(self):
+        first, second = (D, 'WAM'), (D + timedelta(days=1), 'WPM')
+        p = emt()
+        p.wellness_available = {first, second}
+        result = self.solve([p], providers={}, campus=[], wellness={first, second})
+        self.assertEqual(sum(bool(result.wellness[key]) for key in (first, second)), 1)
+        self.assertEqual(len(p.wellness_assigned), 1)
 
     def test_approved_contiguous_combinations(self):
         for ambulance, campus in [(('AM', 'PM'), ()), (('AM',), ('C',)),
@@ -160,7 +297,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(flexible.assigned, [saturday])
         self.assertEqual([len(result.ambulance[k]) for k in (friday, saturday)], [3, 3])
 
-    def test_fourth_night_volunteer_outranks_completing_weekend_day_split_crew(self):
+    def test_weekend_day_crew_baseline_outranks_a_fourth_night_volunteer(self):
         for offset in (4, 5):
             with self.subTest(night_offset=offset):
                 night, day = (D + timedelta(days=offset), 'NIGHT'), (D + timedelta(days=6), 'DAY')
@@ -169,8 +306,8 @@ class SchedulingTests(unittest.TestCase):
                           emt('Night2', ambulance={night}), emt('DayAuth', 'Auth', {day}),
                           emt('DayEMT', ambulance={day})]
                 result = self.solve(people, {night: 'BLS', day: 'BLS'}, caps=HourCaps(12, 0, 9))
-                self.assertEqual(flexible.assigned, [night])
-                self.assertEqual([len(result.ambulance[k]) for k in (night, day)], [4, 2])
+                self.assertEqual(flexible.assigned, [day])
+                self.assertEqual([len(result.ambulance[k]) for k in (night, day)], [3, 3])
 
     def test_bls_night_split_crew_outranks_weekend_day_als_driver(self):
         night, day = (D + timedelta(days=4), 'NIGHT'), (D + timedelta(days=5), 'DAY')
@@ -188,6 +325,17 @@ class SchedulingTests(unittest.TestCase):
         result = self.solve([p], keys, caps=HourCaps(12, 0, 9))
         self.assertEqual(set(p.assigned), {(D, 'AM'), (D, 'PM')})
         self.assertFalse(result.ambulance[(friday, 'NIGHT')])
+
+    def test_evdt_goes_to_als_when_crew_can_cover_bls(self):
+        bls, als = (D, 'AM'), (D, 'PM')
+        evdt = emt('Driver', 'EVDT', {bls, als})
+        crew = emt('Crew', 'EMT', {bls, als})
+        result = self.solve([evdt, crew], {bls: 'BLS', als: 'ALS'},
+                            caps=HourCaps(6, 0, 9))
+        self.assertEqual(evdt.assigned, [als])
+        self.assertEqual(crew.assigned, [bls])
+        self.assertEqual(len(result.ambulance[bls]), 1)
+        self.assertEqual(len(result.ambulance[als]), 1)
 
     def test_als_weekend_night_has_priority_over_weekend_day(self):
         friday, saturday = D + timedelta(days=4), D + timedelta(days=5)
@@ -216,25 +364,26 @@ class SchedulingTests(unittest.TestCase):
                 self.assertEqual(driver.assigned, [weekend if existing_crew < 3 else weekday])
                 self.assertEqual(len(result.ambulance[weekend]), min(existing_crew + 1, 3))
 
-    def test_three_weekend_emts_without_a_driver_still_need_the_evdt(self):
+    def test_weekend_three_person_crew_does_not_require_a_utility_driver(self):
         weekday, weekend = (D, 'NIGHT'), (D + timedelta(days=4), 'NIGHT')
         driver = emt('Driver', 'EVDT', {weekday, weekend})
         people = [driver, emt('Weekday', ambulance={weekday})]
         people.extend(emt(f'Crew{i}', ambulance={weekend}) for i in range(3))
         result = self.solve(people, {weekday: 'ALS', weekend: 'BLS'}, caps=HourCaps(12, 0, 9))
-        self.assertEqual(driver.assigned, [weekend])
-        self.assertGreaterEqual(len(result.ambulance[weekend]), 3)
+        self.assertEqual(driver.assigned, [weekday])
+        self.assertEqual(len(result.ambulance[weekend]), 3)
 
-    def test_als_split_crew_needs_two_distinct_qualified_drivers(self):
+    def test_als_weekend_three_person_crew_needs_only_one_evdt(self):
         key = (D + timedelta(days=5), 'DAY')
-        for truck_cert, second_cert, expected_ready in [('EVDT', 'EMT', 0), ('EVDT', 'Auth', 1),
-                                                        ('EVDT', 'EVDT', 1), ('Auth', 'Auth', 0)]:
+        for truck_cert, second_cert, expected_evdt in [('EVDT', 'EMT', 1), ('EVDT', 'Auth', 1),
+                                                       ('EVDT', 'EVDT', 1), ('Auth', 'Auth', 0)]:
             with self.subTest(truck_cert=truck_cert, second_cert=second_cert):
-                people = [emt('Truck', truck_cert, {key}), emt('Utility', second_cert, {key}),
-                          emt('Crew', ambulance={key})]
+                people = [emt('Truck', truck_cert, {key}), emt('Crew2', second_cert, {key}),
+                          emt('Crew3', ambulance={key})]
                 result = self.solve(people, {key: 'ALS'}, caps=HourCaps(12, 0, 9))
-                ready = next(s for s in result.stages if s.name == 'Saturday days: shifts ready for split crew')
-                self.assertEqual(ready.value, expected_ready)
+                evdt = next((s for s in result.stages
+                             if s.name == 'Saturday days: ALS shifts with EVDT'), None)
+                self.assertEqual(evdt.value if evdt else 0, expected_evdt)
                 self.assertEqual(len(result.ambulance[key]), 3)
 
     def test_three_person_split_crews_outrank_a_fourth_weekend_volunteer(self):
@@ -272,8 +421,11 @@ class SchedulingTests(unittest.TestCase):
                     providers = {k: 'BLS' for k in weekdays}
                     providers[weekend] = provider
                     result = self.solve(people, providers, caps=HourCaps(12, 0, 9))
-                    self.assertEqual(flexible.assigned, [weekend])
-                    self.assertEqual(len(result.ambulance[weekend]), 4)
+                    self.assertEqual(len(result.ambulance[weekend]), 4 if provider == 'ALS' else 3)
+                    if provider == 'ALS':
+                        self.assertEqual(flexible.assigned, [weekend])
+                    else:
+                        self.assertNotIn(weekend, flexible.assigned)
                     self.assertTrue(all(len(result.ambulance[k]) == 1 for k in weekdays))
 
     def test_weekend_staffing_outranks_total_hours_without_losing_coverage(self):
@@ -313,7 +465,7 @@ class SchedulingTests(unittest.TestCase):
     def test_crew_and_campus_capacity(self):
         people = [emt(str(i), ambulance={(D, 'AM')}, campus={(D, 'C')}) for i in range(6)]
         result = self.solve(people)
-        self.assertEqual(len(result.ambulance[D, 'AM']), 2)
+        self.assertEqual(len(result.ambulance[D, 'AM']), 1)
         self.assertEqual(len(result.campus[D, 'C']), 2)
 
     def test_rerun_does_not_accumulate_assignments(self):

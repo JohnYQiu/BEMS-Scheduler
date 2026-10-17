@@ -27,9 +27,9 @@ from models import (
     HourCaps,
     Schedule,
     SHIFT_TIMES,
+    WELLNESS_SHIFT_TIMES,
     Volunteer,
-    crew_cap,
-    is_big_weekend,
+    ambulance_capacity,
 )
 
 # ── Styling ──────────────────────────────────────────────────────────────────
@@ -195,6 +195,20 @@ def _fmt_keys(keys):
     return "; ".join(f"{d.month}/{d.day} {s}" for d, s in sorted(keys))
 
 
+def _build_wellness_sheet(ws, wellness_assignments):
+    ws.title = "Wellness Wagon"
+    ws.freeze_panes = "C3"
+    sections = [(s, f"{WELLNESS_SHIFT_TIMES[s][0]}-{WELLNESS_SHIFT_TIMES[s][1]}")
+                for s in ("WAM", "WPM")]
+
+    def cell_for(people, slot_idx):
+        if slot_idx == 0 and people:
+            return ("\n".join(p.full_name for p in sorted(people, key=lambda p: p.full_name)), C_EMT_BG)
+        return ("", C_EMT_BG)
+
+    _weekly_grid(ws, wellness_assignments, sections, ["Volunteer"], cell_for)
+
+
 def _build_summary_sheet(ws, people, caps):
     ws.title = "Hour Summary"
     ws.freeze_panes = "A2"
@@ -228,9 +242,6 @@ def collect_warnings(schedule, providers, people, caps):
         if providers[key] == "ALS" and not any(p.is_evdt for p in crew):
             issues.append(("ALS — NO EVDT", d, kind,
                            "No assigned EVDT to drive while the ALS provider treats during transport"))
-        if providers[key] == "BLS" and is_big_weekend(*key) and crew and not any(p.is_driver for p in crew):
-            issues.append(("NO UTILITY DRIVER", d, kind,
-                           "No assigned Utility-qualified volunteer for split crew; supervisor can drive ambulance"))
     for p in sorted(people, key=lambda p: p.full_name):
         if isinstance(p, Volunteer) and p.assigned_hours < caps.ambulance:
             issues.append(("AMBULANCE UNDER HOURS", None, "",
@@ -268,14 +279,24 @@ def export_schedule_xlsx(schedule: Schedule, people, providers, caps: HourCaps,
     _build_summary_sheet(wb.create_sheet(), people, caps)
     _build_warnings_sheet(wb.create_sheet(), collect_warnings(schedule, providers, people, caps))
     ws = wb.create_sheet("Solver")
-    _header_row(ws, 1, ["Priority", "Objective", "Status", "Achieved", "Upper Bound", "Seconds"],
+    _header_row(ws, 1, ["Priority", "Objective", "Status", "Achieved", "Bound", "Seconds"],
                 [10, 52, 18, 14, 16, 12])
     for row, stage in enumerate(schedule.stages, 2):
         for col, value in enumerate([row - 1, stage.name, stage.status, stage.value,
                                      stage.bound, round(stage.seconds, 3)], 1):
             ws.cell(row, col, value)
     row = len(schedule.stages) + 3
-    ws.cell(row, 1, "Each stage preserves earlier attained values. FEASIBLE is not proof of an optimum.")
+    ws.cell(row, 1, "Each stage preserves earlier attained values. Bound is upper for maximize, lower for minimize. FEASIBLE is not proof of an optimum.")
+    wb.save(output_path)
+    return str(output_path)
+
+
+def export_wellness_wagon_xlsx(schedule: Schedule, output_path):
+    """Write the standalone Wellness Wagon schedule for manual monthly-view entry."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    _build_wellness_sheet(wb.active, schedule.wellness)
     wb.save(output_path)
     return str(output_path)
 
@@ -285,6 +306,8 @@ def print_summary(schedule, people, providers, caps):
     print(f"  Ambulance shifts with an EMT: {sum(bool(p) for p in schedule.ambulance.values())}/{len(schedule.ambulance)}")
     print(f"  Ambulance volunteer seats: {sum(map(len, schedule.ambulance.values()))}")
     print(f"  Campus blocks with a responder: {sum(bool(p) for p in schedule.campus.values())}/{len(schedule.campus)} (no required minimum)")
+    if schedule.wellness:
+        print(f"  Wellness Wagon shifts filled: {sum(bool(p) for p in schedule.wellness.values())}/{len(schedule.wellness)}")
     for stage in schedule.stages:
         print(f"  {stage.name}: {stage.value}, {stage.status}, bound {stage.bound}, {stage.seconds:.2f}s")
     for kind, d, shift, details in collect_warnings(schedule, providers, people, caps):
@@ -293,50 +316,53 @@ def print_summary(schedule, people, providers, caps):
 
 
 MASTER_SCHEDULE_HEADER = [
-    "Block", "ShiftID", "Date", "Shift", "Vehicle", "Seat", "Requires", "Assigned/Name",
+    "ShiftID", "Date", "Shift", "Vehicle", "Seat", "Requires", "Assigned/Name",
 ]
 
 
 def _ambulance_seats(key, people, provider):
-    """Vehicle-specific volunteer seats; supervisors are supplied separately.
+    """Place volunteer drivers before crew, matching Scheduler V3 seat rows.
 
-    ALS reserves an R1/EVDT seat. On weekends a volunteer may drive U1; Auth
-    and EVDT both qualify. BLS never fabricates an R1 driver shortage, and no
-    crew-only EMT is labelled a driver to make the export fit.
+    ALS always preserves an EVDT-only Driver seat, even if it stays open; an
+    Auth then occupies C2 or later. On BLS, an EVDT takes Driver first, then
+    an Auth; if neither is assigned, volunteers fill crew seats and the
+    supervisor is the fallback driver. Capacity counts people, not empty seats.
     """
     remaining = sorted(people, key=lambda p: p.full_name)
     seats = []
-    cap = crew_cap(*key)
+    cap = ambulance_capacity(*key, provider)
+    driver = None
     if provider == "ALS":
         driver = next((p for p in remaining if p.is_evdt), None)
         seats.append(("R1", "Driver", "EVDT", driver))
+    else:
+        driver = next((p for p in remaining if p.is_evdt), None)
+        if driver is None:
+            driver = next((p for p in remaining if p.certification == "Auth"), None)
         if driver is not None:
-            remaining.remove(driver)
-    if is_big_weekend(*key):
-        driver = next((p for p in remaining if p.is_driver), None)
-        if driver is not None or len(seats) + len(remaining) < cap:
-            seats.append(("U1", "Driver", "AUTH", driver))
-            if driver is not None:
-                remaining.remove(driver)
-    for p in remaining:
-        seats.append(("R1", f"C{len(seats) + 1}", "CREW", p))
-    while len(seats) < cap:
-        seats.append(("R1", f"C{len(seats) + 1}", "CREW", None))
-    if len(seats) > cap:
+            seats.append(("R1", "Driver", driver.certification.upper(), driver))
+    if driver is not None:
+        remaining.remove(driver)
+    crew_slots = cap - (1 if driver is not None or provider == "ALS" else 0)
+    for i in range(crew_slots):
+        person = remaining[i] if i < len(remaining) else None
+        seats.append(("R1", f"C{i + 2}", "CREW", person))
+    if len(remaining) > crew_slots:
         raise ValueError(f"Export would exceed capacity for {key}")
     return seats
 
 
 def export_master_schedule_csv(schedule, providers, block_start, output_path,
-                               block, daynum_start, campus_capacity=2):
+                               block, daynum_start=None, campus_capacity=2):
+    """Write rows in the live V3 Master Schedule schema; IDs use MMDD dates."""
     rows = []
 
     def row(key, vehicle, seat, requires, person):
         d, kind = key
-        daynum = daynum_start + (d - block_start).days
+        date_id = f"{d.month:02d}{d.day:02d}"
         suffix = requires if seat == "Driver" else seat
-        shift_id = f"{block}-{daynum:04d}-{kind}-{vehicle}-{suffix}"
-        return [block, shift_id, f"{d.month}/{d.day}/{d:%y}", kind, vehicle,
+        shift_id = f"{block}-{date_id}-{kind}-{vehicle}-{suffix}"
+        return [shift_id, f"{d.month}/{d.day}/{d:%y}", kind, vehicle,
                 seat, requires, person.full_name if person else ""]
 
     for key, people in sorted(schedule.ambulance.items()):

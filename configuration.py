@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
 from models import (
-    CAMPUS_BLOCKS, HourCaps, LockedAssignment, ShiftKey, all_campus_keys,
-    all_shift_keys, block_dates, campus_ambulance_overlap, interval, is_weekend,
+    CAMPUS_BLOCKS, HourCaps, LockedAssignment, ShiftKey, ambulance_capacity, all_campus_keys,
+    all_shift_keys, all_wellness_keys, block_dates, campus_ambulance_overlap, interval, is_weekend,
 )
+from policy import (DEFAULT_OBJECTIVE_ORDER, validate_custom_priorities,
+                    validate_hard_requirements, validate_objective_order)
 
 
 @dataclass
@@ -19,17 +21,33 @@ class Configuration:
     dates: list[date]
     providers: dict[ShiftKey, str]
     campus_keys: list[ShiftKey]
+    wellness_keys: list[ShiftKey]
+    wellness_capacity: int
     caps: HourCaps
     campus_capacity: int
     time_limit_s: float
     workers: int
     form_csv: Path
     output_xlsx: Path
+    wellness_output_xlsx: Path | None
     master_csv: Path | None
     block: str
     daynum_start: int
     overrides: dict[str, str]
     locks: list[LockedAssignment]
+    objective_order: tuple[str, ...] = DEFAULT_OBJECTIVE_ORDER
+    wellness_shifts_per_week: int = 1
+    forced_crews: list[dict] = field(default_factory=list)
+    custom_priorities: tuple[dict, ...] = ()
+    max_evdt_als_shifts_per_week: int | None = None
+    hard_requirements: tuple[dict, ...] = ()
+
+    @property
+    def requires_driver_status(self) -> bool:
+        return self.max_evdt_als_shifts_per_week is not None or any(
+            item["member_filter"] in ("driver", "evdt", "auth", "non_driver")
+            for item in (*self.custom_priorities, *self.hard_requirements)
+        )
 
 
 def _json_file(path: Path):
@@ -84,6 +102,27 @@ def load_config(path: str | Path) -> Configuration:
         raise ValueError(f"Choose ALS or BLS for {len(unset)} active shift(s): {examples}")
     campus_keys = [k for k in all_campus_keys(dates) if not any(
         k[0] == d and campus_ambulance_overlap(k[1], s) for d, s in blackouts)]
+    wellness = cfg.get("wellness_wagon", {})
+    if not isinstance(wellness, dict):
+        raise ValueError("wellness_wagon must be a JSON object")
+    wellness_enabled = wellness.get("enabled", False)
+    wellness_capacity = wellness.get("capacity", 1)
+    if type(wellness_enabled) is not bool or type(wellness_capacity) is not int or wellness_capacity < 1:
+        raise ValueError("wellness_wagon.enabled must be true/false and capacity a positive integer")
+    wellness_keys = all_wellness_keys(dates) if wellness_enabled else []
+    rules = cfg.get("rules", {})
+    if not isinstance(rules, dict):
+        raise ValueError("rules must be a JSON object")
+    unknown_rules = set(rules) - {"wellness_shifts_per_week", "max_evdt_als_shifts_per_week"}
+    if unknown_rules:
+        raise ValueError(f"Unsupported scheduling rules: {', '.join(sorted(unknown_rules))}")
+    wellness_shifts_per_week = rules.get("wellness_shifts_per_week", 1)
+    if type(wellness_shifts_per_week) is not int or not 1 <= wellness_shifts_per_week <= 5:
+        raise ValueError("rules.wellness_shifts_per_week must be an integer from 1 to 5")
+    max_evdt_als_shifts_per_week = rules.get("max_evdt_als_shifts_per_week")
+    if max_evdt_als_shifts_per_week is not None and (
+            type(max_evdt_als_shifts_per_week) is not int or not 1 <= max_evdt_als_shifts_per_week <= 7):
+        raise ValueError("rules.max_evdt_als_shifts_per_week must be an integer from 1 to 7")
 
     hours = cfg.get("hours", {})
     caps = HourCaps(hours.get("ambulance_emt", 18), hours.get("campus_emt", 6), hours.get("campus_bert", 9))
@@ -103,7 +142,34 @@ def load_config(path: str | Path) -> Configuration:
             raise ValueError("Driver overrides must be a JSON object keyed by email")
         overrides.update(local)
 
+    forced_crews = cfg.get("forced_crews", [])
+    if not isinstance(forced_crews, list):
+        raise ValueError("forced_crews must be a list of required ambulance crews")
+    seen_forced = set()
+    normalized_forces = []
+    for crew in forced_crews:
+        if not isinstance(crew, dict) or set(crew) - {"date", "shift", "members", "note"}:
+            raise ValueError("Each forced crew needs date, shift, members, and optional note")
+        key = (date.fromisoformat(crew["date"]), crew["shift"].upper())
+        if key not in active:
+            raise ValueError(f"Forced crew shift is inactive or outside the block: {key}")
+        members = crew.get("members")
+        if not isinstance(members, list) or not members or any(not isinstance(e, str) or not e.strip() for e in members):
+            raise ValueError(f"Forced crew {key} needs at least one member email")
+        emails = [email.strip().lower() for email in members]
+        if len(emails) != len(set(emails)) or any((key, email) in seen_forced for email in emails):
+            raise ValueError(f"Forced crew {key} contains a duplicate person")
+        seen_forced.update((key, email) for email in emails)
+        if len(emails) > ambulance_capacity(*key, providers[key]):
+            raise ValueError(f"Forced crew {key} exceeds ambulance capacity")
+        note = crew.get("note", "")
+        if not isinstance(note, str) or len(note) > 500:
+            raise ValueError("Forced crew note must be text under 500 characters")
+        normalized_forces.append(dict(date=key[0].isoformat(), shift=key[1], members=emails, note=note))
+
     raw_locks = list(cfg.get("locked_assignments", []))
+    raw_locks.extend(dict(date=crew["date"], shift=crew["shift"], email=email)
+                     for crew in normalized_forces for email in crew["members"])
     locks_file = cfg.get("locked_assignments_file", cfg.get("locked_ambulance_assignments_file"))
     if locks_file and local_path(locks_file).exists():
         local = _json_file(local_path(locks_file))
@@ -119,12 +185,21 @@ def load_config(path: str | Path) -> Configuration:
             raise ValueError(f"Locked campus block is inactive: {key}")
         locks.append(LockedAssignment(item["email"].strip().lower(), key))
 
+    custom_priorities = validate_custom_priorities(cfg.get("custom_priorities", []))
+    hard_requirements = validate_hard_requirements(cfg.get("hard_requirements", []))
     master = cfg.get("master_schedule_export", {})
     return Configuration(
-        dates, providers, campus_keys, caps, capacity, float(time_limit), workers,
+        dates, providers, campus_keys, wellness_keys, wellness_capacity, caps, capacity, float(time_limit), workers,
         local_path(cfg.get("form_csv", "inputs/responses.csv")),
         local_path(cfg.get("output_xlsx", "outputs/schedule.xlsx")),
+        local_path(wellness.get("output_xlsx", "outputs/wellness_wagon.xlsx")) if wellness_enabled else None,
         local_path(master.get("path", "outputs/master_schedule.csv")) if master.get("enabled", True) else None,
         master.get("block", ""), int(master.get("daynum_start", dates[0].month * 100 + dates[0].day)),
         overrides, locks,
+        validate_objective_order(cfg.get("objective_order", DEFAULT_OBJECTIVE_ORDER), custom_priorities),
+        wellness_shifts_per_week,
+        normalized_forces,
+        custom_priorities,
+        max_evdt_als_shifts_per_week,
+        hard_requirements,
     )

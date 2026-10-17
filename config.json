@@ -9,6 +9,11 @@
     "campus_bert": 9
   },
   "campus_capacity": 2,
+  "wellness_wagon": {
+    "enabled": true,
+    "capacity": 1,
+    "output_xlsx": "outputs/wellness_wagon.xlsx"
+  },
   "solver_time_limit_s": 30,
   "solver_workers": 8,
   "driver_status_overrides_file": "driver_status_overrides.local.json",

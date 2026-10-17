@@ -13,7 +13,8 @@ still counts as availability.
 
 Duplicate submissions are resolved by keeping the latest timestamp per email.
 Ambulance EMTs' campus availability is inferred from their AM/PM availability
-(AM -> blocks A,B; PM -> blocks C,D).
+(AM -> blocks A,B; PM -> blocks C,D). The optional Block 3 class-conflict
+question hard-blocks only Campus Response blocks that overlap reported sessions.
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ COL_EMAIL_FALLBACK = "Username"
 COL_TIMESTAMP = "Timestamp"
 COL_DRIVER = "Driver Status"
 COL_DIFFICULTIES = "Do you foresee"   # freeform blackout question (appears once per section)
+COL_CLASS_CONFLICTS = "Class/lab/conference conflicts (Ambulance EMTs)"
+COL_WELLNESS_WORKING = "Are you working for the Wellness Wagon?"
 
 ROLE_EMT_MARKERS = ("ambulance emt", "emt only", "dual-role")
 ROLE_BERT_MARKERS = ("bert member", "bert only")
@@ -104,8 +107,18 @@ def _block_tokens(cell: str) -> list[str]:
     return [t for t in _tokens(cell, r"\b([ABCD])\b") if t in CAMPUS_BLOCKS]
 
 
-def normalise_driver(raw: str) -> str:
-    r = (raw or "").strip().upper()
+def normalise_driver(raw: str, *, strict: bool = False) -> str:
+    r = " ".join((raw or "").strip().upper().split())
+    if strict:
+        # Driver-dependent policies must not infer credentials from fragments
+        # such as "not authorized" or from an absent form answer.
+        if r in ("EVDT", "EVDT DRIVER"):
+            return "EVDT"
+        if r in ("AUTH", "AUTHORIZED", "AUTHORIZED DRIVER", "AUTHORIZED - UTILITY 1"):
+            return "Auth"
+        if r in ("EMT", "NOT A DRIVER", "NON-DRIVER", "NO", "NONE"):
+            return "EMT"
+        raise ValueError(f"Unrecognized Driver Status {raw!r}; correct the form export or provide a driver status override")
     if "EVDT" in r:
         return "EVDT"
     if "AUTH" in r:
@@ -135,7 +148,7 @@ def _find_nth_header(headers: list[str], exact: str, n: int) -> int:
 # ── Column map ───────────────────────────────────────────────────────────────
 
 def _build_column_maps(headers: list[str], block_start: date, block_end: date) -> dict:
-    emt_day, emt_night, emt_weekend, emt_week, bert = {}, {}, {}, {}, {}
+    emt_day, emt_night, emt_weekend, emt_week, bert, wellness = {}, {}, {}, {}, {}, {}
 
     def find(exact: str) -> int:
         return next((i for i, h in enumerate(headers) if (h or "").strip() == exact), -1)
@@ -157,6 +170,9 @@ def _build_column_maps(headers: list[str], block_start: date, block_end: date) -
         if d is None:
             continue
         low = hh.lower()
+        if "wellness wagon availability" in low:
+            wellness[i] = d
+            continue
         if "wellness wagon" in low:
             continue
         # Legacy form: one grid per shift type.
@@ -191,13 +207,16 @@ def _build_column_maps(headers: list[str], block_start: date, block_end: date) -
         "emt_weekend": emt_weekend,
         "emt_week": emt_week,
         "bert": bert,
+        "wellness": wellness,
         "idx_role": find_contains(COL_ROLE),
         "idx_email": find(COL_EMAIL) if find(COL_EMAIL) >= 0 else find(COL_EMAIL_FALLBACK),
         "idx_ts": max(find_contains(COL_TIMESTAMP), 0),
         "idx_driver": find_contains(COL_DRIVER),
+        "idx_wellness_working": find(COL_WELLNESS_WORKING),
         "idx_emt_first": _find_nth_header(headers, "First Name", 0),
         "idx_emt_last": _find_nth_header(headers, "Last Name", 0),
         "idx_emt_diff": idx_emt_diff,
+        "idx_class_conflicts": find_contains(COL_CLASS_CONFLICTS),
         "idx_bert_first": idx_bert_first,
         "idx_bert_last": _find_nth_header(headers, "Last Name", 1),
         "idx_bert_diff": find_contains(COL_DIFFICULTIES, after=idx_emt_diff),
@@ -245,6 +264,85 @@ def parse_blackouts(raw: str, year: int) -> tuple[set, set]:
             else:
                 days.add(dt)
     return slots, days
+
+
+# ── Class conflict parsing ───────────────────────────────────────────────────
+
+_WEEKDAY_NUMBERS = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3,
+                    "FRI": 4, "SAT": 5, "SUN": 6}
+_CLASS_WEEKLY = re.compile(
+    r"^WEEKLY\s+(MON|TUE|WED|THU|FRI|SAT|SUN)\s+(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})$",
+    re.IGNORECASE,
+)
+_CLASS_DATED = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})$"
+)
+
+
+def _minutes_since_midnight(value: str) -> int:
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value)
+    if not m:
+        raise ValueError(f"Invalid class-conflict time {value!r}; use HH:MM in 24-hour time")
+    hour, minute = map(int, m.groups())
+    if hour > 23 or minute > 59:
+        raise ValueError(f"Invalid class-conflict time {value!r}; use HH:MM in 24-hour time")
+    return hour * 60 + minute
+
+
+def parse_class_conflicts(raw: str, block_start: date, block_end: date) -> set:
+    """Return Campus Response blocks that overlap reported class sessions.
+
+    Accepted lines are ``WEEKLY TUE 10:30-11:50`` and
+    ``2026-10-27 13:00-14:30``. Any positive overlap hard-blocks that CR
+    block; this function never changes ambulance availability.
+    """
+    conflicts: set = set()
+    if not raw or raw.strip().upper() in ("N/A", "NA"):
+        return conflicts
+
+    sessions = []
+    for entry in re.split(r"[;\n]+", raw):
+        line = entry.strip()
+        if not line:
+            continue
+        weekly = _CLASS_WEEKLY.fullmatch(line)
+        dated = _CLASS_DATED.fullmatch(line)
+        if weekly:
+            day_code, start_s, end_s = weekly.groups()
+            weekday = _WEEKDAY_NUMBERS[day_code.upper()]
+            dates = []
+            current = block_start
+            while current <= block_end:
+                if current.weekday() == weekday:
+                    dates.append(current)
+                current += timedelta(days=1)
+        elif dated:
+            date_s, start_s, end_s = dated.groups()
+            try:
+                session_date = date.fromisoformat(date_s)
+            except ValueError as exc:
+                raise ValueError(f"Invalid class-conflict date {date_s!r}") from exc
+            if not block_start <= session_date <= block_end:
+                raise ValueError(f"Class-conflict date {date_s!r} is outside the configured block")
+            dates = [session_date]
+        else:
+            raise ValueError(
+                f"Could not parse class-conflict line {line!r}; use WEEKLY TUE 10:30-11:50 "
+                "or YYYY-MM-DD 13:00-14:30"
+            )
+
+        start_min, end_min = _minutes_since_midnight(start_s), _minutes_since_midnight(end_s)
+        if end_min <= start_min:
+            raise ValueError(f"Class-conflict end time must be after start time: {line!r}")
+        sessions.extend((session_date, start_min, end_min) for session_date in dates)
+
+    for session_date, class_start, class_end in sessions:
+        for index, block in enumerate(CAMPUS_BLOCKS):
+            block_start_min = (7 + 3 * index) * 60
+            block_end_min = block_start_min + 3 * 60
+            if max(class_start, block_start_min) < min(class_end, block_end_min):
+                conflicts.add((session_date, block))
+    return conflicts
 
 
 # ── Row expansion ────────────────────────────────────────────────────────────
@@ -298,6 +396,17 @@ def infer_campus_availability(v: Volunteer) -> set:
     return result
 
 
+def _wellness_availability(row: list[str], maps: dict) -> set:
+    """Return weekday Wellness Wagon AM/PM availability for opted-in members."""
+    if _safe(row, maps["idx_wellness_working"]).lower() != "yes":
+        return set()
+    available = set()
+    for idx, d in maps["wellness"].items():
+        for shift in _shift_tokens(_safe(row, idx)):
+            available.add((d, f"W{shift}"))
+    return available
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def load_all_responses(
@@ -305,6 +414,7 @@ def load_all_responses(
     block_start: date,
     block_end: date,
     driver_status_overrides: Optional[dict[str, str]] = None,
+    require_driver_status: bool = False,
 ) -> tuple[list[Volunteer], list[BertMember]]:
     path = Path(csv_path)
     if path.suffix.lower() == ".zip":
@@ -325,6 +435,8 @@ def load_all_responses(
     year = block_start.year
     if maps["idx_email"] < 0 or maps["idx_role"] < 0:
         raise ValueError("Response CSV must contain an email and role column")
+    if require_driver_status and maps["idx_driver"] < 0:
+        raise ValueError("Driver-dependent policy requires a Driver Status column in the response CSV")
     if not any(maps[k] for k in ("emt_day", "emt_night", "emt_weekend", "emt_week", "bert")):
         raise ValueError("No scheduling columns match the configured block dates")
 
@@ -363,14 +475,17 @@ def load_all_responses(
             first_name=_safe(row, maps["idx_emt_first"]),
             last_name=_safe(row, maps["idx_emt_last"]),
             email=email,
-            certification=driver_status_overrides.get(
-                email, normalise_driver(_safe(row, maps["idx_driver"]))
-            ),
+            certification=(driver_status_overrides[email] if email in driver_status_overrides else
+                           normalise_driver(_safe(row, maps["idx_driver"]), strict=require_driver_status)),
             available=available,
             blackout_slots=blackout_slots,
             blackout_dates=blackout_dates,
         )
         v.campus_available = infer_campus_availability(v)
+        v.campus_available.difference_update(
+            parse_class_conflicts(_safe(row, maps["idx_class_conflicts"]), block_start, block_end)
+        )
+        v.wellness_available = _wellness_availability(row, maps)
         volunteers.append(v)
 
     bert_members: list[BertMember] = []
@@ -385,14 +500,16 @@ def load_all_responses(
         for (d, tok) in blackout_slots:
             if tok in CAMPUS_BLOCKS:
                 campus_available.discard((d, tok))
-        bert_members.append(BertMember(
+        bert_member = BertMember(
             first_name=_safe(row, maps["idx_bert_first"]),
             last_name=_safe(row, maps["idx_bert_last"]),
             email=email,
             campus_available=campus_available,
             blackout_slots=blackout_slots,
             blackout_dates=blackout_dates,
-        ))
+        )
+        bert_member.wellness_available = _wellness_availability(row, maps)
+        bert_members.append(bert_member)
 
     print(f"  Loaded {len(volunteers)} Ambulance EMT volunteers from form.")
     print(f"  Loaded {len(bert_members)} BERT members from form.")

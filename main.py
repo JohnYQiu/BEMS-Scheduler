@@ -6,26 +6,40 @@ import argparse
 from pathlib import Path
 
 from configuration import load_config
-from output import export_master_schedule_csv, export_schedule_xlsx, print_summary
+from forces import validate_forced_crews
+from output import (export_master_schedule_csv, export_schedule_xlsx,
+                    export_wellness_wagon_xlsx, print_summary)
 from parse_form import load_all_responses
 from solver import solve_schedule
 from validation import validate_schedule
+from policy import hard_requirement_warnings
 
 
 def run(config_path, check_only=False):
     config = load_config(config_path)
     volunteers, bert_members = load_all_responses(
-        config.form_csv, config.dates[0], config.dates[-1], config.overrides)
+        config.form_csv, config.dates[0], config.dates[-1], config.overrides,
+        require_driver_status=config.requires_driver_status)
     people = volunteers + bert_members
+    validate_forced_crews(config, volunteers)
+    for warning in hard_requirement_warnings(config.hard_requirements, people, config.providers,
+                                               config.campus_keys, config.campus_capacity):
+        print(f"HARD REQUIREMENT WARNING: {warning}")
     if not people:
         raise ValueError("No scheduling members found in the response CSV")
     print(f"Block: {config.dates[0]} to {config.dates[-1]}")
     print("Solving ambulance and campus response together...")
     schedule = solve_schedule(
         people, config.providers, config.campus_keys, config.caps,
-        config.campus_capacity, config.locks, config.time_limit_s, config.workers)
-    errors = validate_schedule(schedule, people, config.providers, config.campus_keys,
-                               config.caps, config.campus_capacity, config.locks)
+        config.campus_capacity, config.locks, config.time_limit_s, config.workers,
+        config.wellness_keys, config.wellness_capacity, config.objective_order,
+        config.wellness_shifts_per_week, config.custom_priorities,
+        config.max_evdt_als_shifts_per_week, config.hard_requirements)
+    errors = validate_schedule(
+        schedule, people, config.providers, config.campus_keys, config.caps,
+        config.campus_capacity, config.locks, config.wellness_keys, config.wellness_capacity,
+        config.wellness_shifts_per_week, config.max_evdt_als_shifts_per_week,
+        config.hard_requirements)
     if errors:
         raise RuntimeError("Schedule failed validation; nothing exported:\n" + "\n".join(errors))
     print("All hard scheduling rules verified against the resulting assignments.")
@@ -34,6 +48,9 @@ def run(config_path, check_only=False):
         path = export_schedule_xlsx(schedule, people, config.providers, config.caps,
                                     config.output_xlsx, config.campus_capacity)
         print(f"Workbook: {path}")
+        if config.wellness_output_xlsx:
+            path = export_wellness_wagon_xlsx(schedule, config.wellness_output_xlsx)
+            print(f"Wellness Wagon workbook: {path}")
         if config.master_csv:
             path = export_master_schedule_csv(
                 schedule, config.providers, config.dates[0], config.master_csv,

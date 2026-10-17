@@ -6,16 +6,19 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 ShiftKey = tuple[date, str]
-SHIFT_HOURS = {"AM": 6, "PM": 6, "NIGHT": 12, "DAY": 12}
+SHIFT_HOURS = {"AM": 6, "PM": 6, "NIGHT": 12, "DAY": 12,
+               "WAM": 6, "WPM": 6}
 SHIFT_TIMES = {"AM": ("0700", "1300"), "PM": ("1300", "1900"),
                "NIGHT": ("1900", "0700+1"), "DAY": ("0700", "1900")}
+WELLNESS_SHIFTS = ("WAM", "WPM")
+WELLNESS_SHIFT_TIMES = {"WAM": ("0700", "1300"), "WPM": ("1300", "1900")}
 WEEKEND_PRIORITY_LABELS = ("Friday nights", "Saturday nights", "Saturday days", "Sunday days")
 CAMPUS_BLOCKS = ("A", "B", "C", "D")
 CAMPUS_BLOCK_HOURS = 3
 CAMPUS_BLOCK_TIMES = {"A": "0700-1000", "B": "1000-1300",
                       "C": "1300-1600", "D": "1600-1900"}
 START_HOURS = {"AM": 7, "PM": 13, "DAY": 7, "NIGHT": 19,
-               "A": 7, "B": 10, "C": 13, "D": 16}
+               "WAM": 7, "WPM": 13, "A": 7, "B": 10, "C": 13, "D": 16}
 
 
 def is_weekend(d: date) -> bool:
@@ -49,8 +52,17 @@ def is_big_weekend(d: date, kind: str) -> bool:
 
 
 def crew_cap(d: date, kind: str) -> int:
-    """Volunteer seats; the separately supplied supervisor is not included."""
+    """Maximum volunteer positions in the legacy scheduling model."""
     return 4 if is_big_weekend(d, kind) else 3 if kind == "NIGHT" else 2
+
+
+def ambulance_capacity(d: date, kind: str, provider: str) -> int:
+    """R1 seats visible in Scheduler V3 for the given supervisor type."""
+    if provider == "ALS":
+        return crew_cap(d, kind)
+    # V3 has one BLS daytime crew row (C2) and three BLS night/weekend crew
+    # rows (C2–C4). C1 and C5 are not rendered by its views.
+    return 1 if kind in ("AM", "PM") else 3
 
 
 def block_dates(start: date, end: date) -> list[date]:
@@ -65,6 +77,11 @@ def all_shift_keys(dates: list[date]) -> list[ShiftKey]:
 
 def all_campus_keys(dates: list[date]) -> list[ShiftKey]:
     return [(d, b) for d in dates if not is_weekend(d) for b in CAMPUS_BLOCKS]
+
+
+def all_wellness_keys(dates: list[date]) -> list[ShiftKey]:
+    """Wellness Wagon runs one AM and one PM shift on weekdays only."""
+    return [(d, s) for d in dates if not is_weekend(d) for s in WELLNESS_SHIFTS]
 
 
 def interval(key: ShiftKey) -> tuple[datetime, datetime]:
@@ -86,9 +103,11 @@ class BertMember:
     email: str
     certification: str = "BERT"
     campus_available: set[ShiftKey] = field(default_factory=set)
+    wellness_available: set[ShiftKey] = field(default_factory=set)
     blackout_slots: set[ShiftKey] = field(default_factory=set)
     blackout_dates: set[date] = field(default_factory=set)
     campus_assigned: list[ShiftKey] = field(default_factory=list)
+    wellness_assigned: list[ShiftKey] = field(default_factory=list)
 
     def __post_init__(self):
         self.email = self.email.strip().lower()
@@ -156,4 +175,5 @@ class SolveStage:
 class Schedule:
     ambulance: dict[ShiftKey, list[Volunteer]]
     campus: dict[ShiftKey, list[BertMember]]
+    wellness: dict[ShiftKey, list[BertMember]] = field(default_factory=dict)
     stages: list[SolveStage] = field(default_factory=list)
