@@ -13,7 +13,7 @@ from forces import crew_options
 from main import run
 from models import Volunteer
 from parse_form import (_build_column_maps, infer_campus_availability,
-                        load_all_responses, parse_class_conflicts)
+                        load_all_responses, parse_class_conflict_blocks, parse_class_conflicts)
 
 D = date(2026, 9, 21)
 HEADERS = ['Timestamp', 'Username', 'Are you an ambulance EMT or BERT member?',
@@ -115,16 +115,36 @@ class InputTests(unittest.TestCase):
                       blackout_slots={(D, 'B')})
         self.assertEqual(infer_campus_availability(p), {(D, 'A'), (D, 'C'), (D, 'D')})
 
-    def test_class_conflicts_hard_block_every_overlapping_cr_block(self):
-        conflicts = parse_class_conflicts(
-            '2026-09-21 09:30-10:30\n2026-09-21 15:30-16:30', D, D
-        )
-        self.assertEqual(conflicts, {(D, 'A'), (D, 'B'), (D, 'C'), (D, 'D')})
+    def test_class_conflicts_use_current_block3_header_and_threshold(self):
+        maps = _build_column_maps(["Class/lab/conference conflicts"],
+                                  date(2026, 10, 19), date(2026, 11, 15))
+        self.assertEqual(maps["idx_class_conflicts"], 0)
+        hard, soft = parse_class_conflict_blocks(
+            "WEEKLY TUE 13:00-14:20\nWEEKLY TUE 18:30-19:30",
+            date(2026, 10, 19), date(2026, 11, 15))
+        self.assertIn((date(2026, 11, 10), "C"), hard)
+        self.assertNotIn((date(2026, 11, 10), "D"), hard)
+        self.assertIn((date(2026, 11, 10), "D"), soft)
 
-    def test_weekly_class_conflicts_expand_through_the_block(self):
-        conflicts = parse_class_conflicts('WEEKLY MON 09:30-10:30', D, date(2026, 9, 28))
-        self.assertEqual(conflicts, {(D, 'A'), (D, 'B'),
-                                     (date(2026, 9, 28), 'A'), (date(2026, 9, 28), 'B')})
+    def test_class_conflicts_under_hour_are_soft_not_hard(self):
+        raw = '2026-09-21 09:30-10:30\n2026-09-21 15:30-16:30'
+        hard, soft = parse_class_conflict_blocks(raw, D, D)
+        self.assertEqual(hard, set())
+        self.assertEqual(soft, {(D, 'A'), (D, 'B'), (D, 'C'), (D, 'D')})
+        self.assertEqual(parse_class_conflicts(raw, D, D), set())
+
+    def test_weekly_soft_class_conflicts_expand_through_the_block(self):
+        hard, soft = parse_class_conflict_blocks(
+            'WEEKLY MON 09:30-10:30', D, date(2026, 9, 28))
+        self.assertEqual(hard, set())
+        self.assertEqual(soft, {(D, 'A'), (D, 'B'),
+                                (date(2026, 9, 28), 'A'), (date(2026, 9, 28), 'B')})
+
+    def test_sixty_minutes_is_hard_and_59_minutes_is_soft(self):
+        hard, soft = parse_class_conflict_blocks(
+            '2026-09-21 10:00-11:00; 2026-09-21 13:00-13:59', D, D)
+        self.assertEqual(hard, {(D, 'B')})
+        self.assertEqual(soft, {(D, 'C')})
 
     def test_block3_ninety_minute_class_blocks_three_hour_cr_slot(self):
         start, end = date(2026, 10, 19), date(2026, 11, 15)
@@ -137,7 +157,7 @@ class InputTests(unittest.TestCase):
     def test_class_conflict_removes_only_cr_availability_not_ambulance(self):
         row = ['9/18/2026 10:00:00', 'test@example.com', 'Ambulance EMT',
                'Test', 'Person', 'Not a driver', 'AM', '', '', '', '',
-               '2026-09-21 10:30-10:31']
+               '2026-09-21 10:00-11:00']
         emts, _ = self.load([row])
         self.assertEqual(emts[0].available, {(D, 'AM')})
         self.assertEqual(emts[0].campus_available, {(D, 'A')})
