@@ -331,6 +331,13 @@ def solve_schedule(
             rule["direction"],
         )
     objectives = [objective_by_id[identifier] for identifier in objective_order]
+    # Avoid sub-hour class conflicts after all higher-priority objectives tie.
+    soft_conflict_count = sum(
+        var for key, entries in cr_by_key.items()
+        for pi, var in entries if key in people[pi].campus_soft_conflicts
+    )
+    if not isinstance(soft_conflict_count, int):
+        objectives.append(("Avoid sub-hour class conflicts", -soft_conflict_count))
     values, stages = _optimize(model, objectives, time_limit_s, workers)
     result = Schedule(
         {k: [] for k in sorted(providers)},
