@@ -43,7 +43,7 @@ COL_EMAIL_FALLBACK = "Username"
 COL_TIMESTAMP = "Timestamp"
 COL_DRIVER = "Driver Status"
 COL_DIFFICULTIES = "Do you foresee"   # freeform blackout question (appears once per section)
-COL_CLASS_CONFLICTS = "Class/lab/conference conflicts (Ambulance EMTs)"
+COL_CLASS_CONFLICTS = "Class/lab/conference conflicts"
 COL_WELLNESS_WORKING = "Are you working for the Wellness Wagon?"
 
 ROLE_EMT_MARKERS = ("ambulance emt", "emt only", "dual-role")
@@ -289,16 +289,18 @@ def _minutes_since_midnight(value: str) -> int:
     return hour * 60 + minute
 
 
-def parse_class_conflicts(raw: str, block_start: date, block_end: date) -> set:
-    """Return Campus Response blocks that overlap reported class sessions.
+def parse_class_conflict_blocks(raw: str, block_start: date, block_end: date) -> tuple[set, set]:
+    """Return (hard conflicts, soft conflicts) for Campus Response blocks.
 
     Accepted lines are ``WEEKLY TUE 10:30-11:50`` and
-    ``2026-10-27 13:00-14:30``. Any positive overlap hard-blocks that CR
-    block; this function never changes ambulance availability.
+    ``2026-10-27 13:00-14:30``. At least 60 minutes of overlap makes
+    a block unavailable; shorter positive overlaps are scheduling preferences.
+    Ambulance availability is unchanged.
     """
-    conflicts: set = set()
+    hard_conflicts: set = set()
+    soft_conflicts: set = set()
     if not raw or raw.strip().upper() in ("N/A", "NA"):
-        return conflicts
+        return hard_conflicts, soft_conflicts
 
     sessions = []
     for entry in re.split(r"[;\n]+", raw):
@@ -340,9 +342,18 @@ def parse_class_conflicts(raw: str, block_start: date, block_end: date) -> set:
         for index, block in enumerate(CAMPUS_BLOCKS):
             block_start_min = (7 + 3 * index) * 60
             block_end_min = block_start_min + 3 * 60
-            if max(class_start, block_start_min) < min(class_end, block_end_min):
-                conflicts.add((session_date, block))
-    return conflicts
+            overlap = min(class_end, block_end_min) - max(class_start, block_start_min)
+            if overlap >= 60:
+                hard_conflicts.add((session_date, block))
+            elif overlap > 0:
+                soft_conflicts.add((session_date, block))
+    soft_conflicts.difference_update(hard_conflicts)
+    return hard_conflicts, soft_conflicts
+
+
+def parse_class_conflicts(raw: str, block_start: date, block_end: date) -> set:
+    """Return CR blocks with at least one hour of class overlap."""
+    return parse_class_conflict_blocks(raw, block_start, block_end)[0]
 
 
 # ── Row expansion ────────────────────────────────────────────────────────────
@@ -482,9 +493,11 @@ def load_all_responses(
             blackout_dates=blackout_dates,
         )
         v.campus_available = infer_campus_availability(v)
-        v.campus_available.difference_update(
-            parse_class_conflicts(_safe(row, maps["idx_class_conflicts"]), block_start, block_end)
+        hard_conflicts, soft_conflicts = parse_class_conflict_blocks(
+            _safe(row, maps["idx_class_conflicts"]), block_start, block_end
         )
+        v.campus_available.difference_update(hard_conflicts)
+        v.campus_soft_conflicts = soft_conflicts
         v.wellness_available = _wellness_availability(row, maps)
         volunteers.append(v)
 
