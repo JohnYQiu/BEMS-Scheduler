@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import timedelta
 
 from models import HourCaps, Schedule, Volunteer, ambulance_capacity, interval, SHIFT_HOURS
-from policy import validate_hard_requirements, _hard_requirement_member_match
+from policy import validate_hard_requirements, member_matches
 
 
 def validate_schedule(schedule: Schedule, people, providers, campus_keys,
@@ -112,7 +112,7 @@ def validate_schedule(schedule: Schedule, people, providers, campus_keys,
                 continue
             if rule["service"] == "ambulance" and rule["provider"] != "any" and providers[key] != rule["provider"]:
                 continue
-            count = sum(_hard_requirement_member_match(person, rule["member_filter"]) for person in assigned)
+            count = sum(member_matches(person, rule) for person in assigned)
             if count < rule["min_people"]:
                 errors.append(f"{key}: hard requirement '{rule['label']}' requires {rule['min_people']} matching people; got {count}")
     for lock in locks:

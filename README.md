@@ -5,14 +5,10 @@ Google Form's **Form Responses** sheet. A ZIP containing that CSV also works.
 The schedule includes volunteer assignments; supervisors are supplied separately.
 Wellness Wagon can be enabled as a separate, manual-entry workbook. It never changes the Master Schedule CSV or writes to Google Sheets.
 
-**Workflow: export responses → edit `config.json` → run → review the output.**
+**Workflow: export responses → configure the block in the local browser editor → run → review the output.** The JSON file remains available for advanced manual editing.
 The program reads a downloaded file. It does not connect to or update Google Sheets.
 
-This `main` branch is the current Terminal scheduler with forced crews. For the local
-browser editor and macOS desktop installer, use the
-[`feature/officer-editor` branch](https://github.com/noahlangbo/BEMS-Scheduler/tree/feature/officer-editor).
-The pre-forced-crew version remains on
-[`legacy-before-forces`](https://github.com/noahlangbo/BEMS-Scheduler/tree/legacy-before-forces).
+The current `main` branch includes the local browser configuration editor and macOS desktop installer. The editor runs in your browser on your own computer; it edits the local configuration and does not sync live with Google Sheets. `feature/officer-editor` currently matches `main`; use the latest repository download for new installations. The pre-forced-crew version remains on [`legacy-before-forces`](https://github.com/noahlangbo/BEMS-Scheduler/tree/legacy-before-forces).
 
 ## 1. Set up the project once
 
@@ -27,7 +23,9 @@ git clone https://github.com/noahlangbo/BEMS-Scheduler.git
 cd BEMS-Scheduler
 ```
 
-Then create the project's Python environment and install its dependencies:
+To install the desktop copy, double-click `Install on Desktop.command` in the downloaded repository folder. To use the editor, double-click `Open BEMS Editor.command` from the installed folder; keep its Terminal window open while editing. To update later, download the latest repository version and run its installer again. It replaces the program files, carries forward your configs and local data, and keeps a full rollback copy on your Desktop. The installed editor does not fetch GitHub changes automatically; rerun the installer when you want the latest editor features.
+
+For a manual Terminal setup, create the project's Python environment and install its dependencies:
 
 ```sh
 python3 --version
@@ -71,7 +69,7 @@ wrong availability dates.
 
 ## 3. Configure the block
 
-Open `config.json` in a text editor. Update these settings for every new block:
+Open the browser editor from the desktop shortcut and update these settings for every new block. The editor validates the provider grid and can build supported priorities and hard requirements without JSON editing. You can still open `config.json` in a text editor for advanced changes:
 
 | Setting | What to enter |
 | --- | --- |
@@ -375,10 +373,84 @@ Add `forced_crews` to the selected block config, for example:
 ```
 
 Use individual weekday `AM` or `PM` shifts, weekend `DAY`, or `NIGHT`.
-Emails must match the latest responses. This version retains the ordinary
-Terminal workflow: run `main.py --check` first, then inspect the output before
-publishing. The separate `officer-editor` branch provides a local browser UI
-for composing these crews from the available-member list.
+Emails must match the latest responses. The editor composes these crews from the available-member list. Run `main.py --check` first, then inspect the output before publishing.
 
 **Current model boundary:** Utility vehicle assignments are not modeled by the
 solver. A three-person ambulance crew target is not proof of Utility readiness.
+
+## Roster-based member filters
+
+The editor can use roster attributes in both hard requirements and custom
+priorities. Export the `Roster` tab as a CSV, save it locally (for example,
+`inputs/roster.csv`), and set **Roster attributes file (optional)** in the editor.
+The CSV must include `BrownEmail` and may include `ClassYear`, `PrimaryStatus`,
+`RoleStatus`, `DriverRank`, `AccessStatus`, `DriverStatus`, `Role`, or
+`SchedulerAdmin`. Matching uses email, so names do not need to match exactly.
+These fields are loaded from the saved CSV; there is no live Google Sheets
+connection. Export a fresh roster CSV after changing roster values.
+
+When a roster CSV is configured, choose **Roster attribute** as the member filter
+and select a field and value. The same selector is available for soft priorities
+and hard requirements. For example, a priority can maximize ambulance hours
+assigned to members with `ClassYear = 2027`; a hard requirement can require at
+least one member with `RoleStatus = EVDT` on each matching ALS shift. The editor
+shows the candidate values found in the CSV. These filters select members for
+that rule while existing credential eligibility checks remain in force. A rule
+that requires more matching
+people than are available will stop the solve rather than silently ignore the
+rule.
+
+
+## Rule and priority catalog
+
+### Built-in priorities
+
+The editor starts with 18 built-in priorities. You can reorder them; a higher
+item is optimized before a lower one. They are ordered by default as:
+
+1. Ambulance shifts with an EMT
+2. Friday night ALS shifts with an EVDT
+3. Friday night crew seats toward three volunteers
+4. Saturday night ALS shifts with an EVDT
+5. Saturday night crew seats toward three volunteers
+6. Saturday day ALS shifts with an EVDT
+7. Sunday day ALS shifts with an EVDT
+8. Other ALS shifts with an EVDT
+9. Saturday day crew seats toward three volunteers
+10. Sunday day crew seats toward three volunteers
+11. Friday night volunteer seats filled
+12. Saturday night volunteer seats filled
+13. Saturday day volunteer seats filled
+14. Sunday day volunteer seats filled
+15. Ambulance hours within caps
+16. Campus blocks with a responder
+17. Campus hours within caps
+18. Wellness Wagon shifts filled
+
+### Custom priorities (soft preferences)
+
+The editor supports up to 24 additional priorities. Each can maximize or
+minimize **assignments**, **covered shifts**, or **hours** for Ambulance,
+Campus Response, or Wellness Wagon. Filters include any member, driver, EVDT,
+Auth, non-driver, EMT, BERT, or an exact roster field/value. You can also limit
+an Ambulance priority to ALS or BLS and choose weekdays and shift kinds. Custom
+priorities are ordered alongside the built-in priorities and never override
+hard eligibility, availability, rest, or capacity rules.
+
+### Custom hard requirements
+
+The editor supports up to 24 hard requirements. Each sets a minimum of 1–4
+matching people on every selected Ambulance or Campus shift. It supports the
+same built-in and roster attribute member filters, ALS/BLS provider selection
+for Ambulance, weekdays, and shift kinds. A hard requirement can make a block
+infeasible; the editor warns about obvious availability/capacity problems and
+the solver rejects a truly infeasible combination.
+
+### Optional rule library
+
+These are separate, preimplemented hard limits that can be added independently:
+
+| Rule | Allowed setting | Default behavior |
+| --- | --- | --- |
+| Wellness shifts per person per week | 1–5 | Maximum of 1, Monday–Friday |
+| Maximum ALS shifts per EVDT per week | 1–7 | Not enabled unless added; editor starts it at 2 |

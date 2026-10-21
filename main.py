@@ -13,6 +13,7 @@ from parse_form import load_all_responses
 from solver import solve_schedule
 from validation import validate_schedule
 from policy import hard_requirement_warnings
+from member_attributes import apply_member_attributes
 
 
 def run(config_path, check_only=False):
@@ -21,6 +22,9 @@ def run(config_path, check_only=False):
         config.form_csv, config.dates[0], config.dates[-1], config.overrides,
         require_driver_status=config.requires_driver_status)
     people = volunteers + bert_members
+    if config.member_attributes_csv:
+        for warning in apply_member_attributes(config.member_attributes_csv, people):
+            print(f"ROSTER DATA WARNING: {warning}")
     validate_forced_crews(config, volunteers)
     for warning in hard_requirement_warnings(config.hard_requirements, people, config.providers,
                                                config.campus_keys, config.campus_capacity):

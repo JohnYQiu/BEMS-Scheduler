@@ -24,6 +24,7 @@ from policy import (CUSTOM_PRIORITY_CATALOG, DEFAULT_OBJECTIVE_ORDER, HARD_REQUI
                     OBJECTIVE_LABELS, validate_custom_priorities, validate_hard_requirements,
                     validate_objective_order)
 from rule_catalog import FIELD_CATALOG, FIELD_BY_PATH, OPTIONAL_RULES, RULE_BY_PATH
+from member_attributes import load_attribute_catalog
 
 DEFAULT_PRIORITIES = DEFAULT_OBJECTIVE_ORDER
 ROOT = Path(__file__).resolve().parent
@@ -63,6 +64,10 @@ def scalar_paths(cfg: dict) -> dict[str, type]:
     for key, value in cfg.items():
         if key not in RESERVED:
             visit(value, [key])
+    # New optional controls should remain available in older local configs after
+    # a code update; their blank value preserves the old behavior.
+    if "/member_attributes_csv" not in found:
+        found["/member_attributes_csv"] = str
     return {pointer: kind for pointer, kind in found.items() if pointer in FIELD_BY_PATH}
 
 
@@ -268,11 +273,27 @@ def make_handler(config_path: Path, token: str):
                 try:
                     cfg, version = read_config(config_path)
                     _dates_and_keys(cfg)
+                    attribute_catalog = {}
+                    attribute_error = ""
+                    attribute_path = cfg.get("member_attributes_csv")
+                    if attribute_path:
+                        source = Path(attribute_path)
+                        if not source.is_absolute():
+                            source = config_path.parent / source
+                        if source.is_file():
+                            try:
+                                attribute_catalog = load_attribute_catalog(source)
+                            except (OSError, ValueError) as exc:
+                                attribute_error = str(exc)
+                        else:
+                            attribute_error = f"Roster CSV not found: {source}"
                     self._json(200, {"config": cfg, "version": version, "token": token,
                                      "path": str(config_path), "default_priorities": DEFAULT_PRIORITIES,
                                      "priority_labels": OBJECTIVE_LABELS,
                                      "custom_priority_catalog": CUSTOM_PRIORITY_CATALOG,
                                      "hard_requirement_catalog": HARD_REQUIREMENT_CATALOG,
+                                     "member_attribute_catalog": attribute_catalog,
+                                     "member_attribute_error": attribute_error,
                                      "field_catalog": FIELD_CATALOG, "rule_catalog": OPTIONAL_RULES,
                                      "scalar_paths": list(scalar_paths(cfg))})
                 except (OSError, ValueError, json.JSONDecodeError) as exc:

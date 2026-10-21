@@ -14,7 +14,7 @@ from models import (
     WEEKEND_PRIORITY_LABELS, ambulance_capacity, weekend_priority,
 )
 from policy import (DEFAULT_OBJECTIVE_ORDER, OBJECTIVE_LABELS, validate_custom_priorities,
-                    validate_hard_requirements, validate_objective_order)
+                    validate_hard_requirements, validate_objective_order, member_matches)
 
 
 def _present(model, variables, name):
@@ -34,23 +34,6 @@ def _at_least(model, variables, minimum, name):
     return enough
 
 
-def _matches_member(person, selected):
-    """Match a form-derived role/driver status; never alter eligibility."""
-    if selected == "any":
-        return True
-    if selected == "driver":
-        return person.is_driver
-    if selected == "evdt":
-        return person.is_evdt
-    if selected == "auth":
-        return person.certification == "Auth"
-    if selected == "non_driver":
-        return not person.is_driver
-    if selected == "emt":
-        return isinstance(person, Volunteer)
-    return not isinstance(person, Volunteer)  # validated value: bert
-
-
 def _custom_objective(model, rule, people, providers, by_service):
     """Build a soft expression from supported, validated assignment filters."""
     terms = []
@@ -61,7 +44,7 @@ def _custom_objective(model, rule, people, providers, by_service):
             continue
         if rule["service"] == "ambulance" and rule["provider"] != "any" and providers[key] != rule["provider"]:
             continue
-        selected = [var for pi, var in entries if _matches_member(people[pi], rule["member_filter"])]
+        selected = [var for pi, var in entries if member_matches(people[pi], rule)]
         if rule["metric"] == "covered_shifts":
             terms.append(_present(model, selected, f"{rule['id']}_{key[0]}_{key[1]}"))
         elif rule["metric"] == "hours":
@@ -204,7 +187,7 @@ def solve_schedule(
                 continue
             if rule["service"] == "ambulance" and rule["provider"] != "any" and providers[key] != rule["provider"]:
                 continue
-            matching = [var for pi, var in entries if _matches_member(people[pi], rule["member_filter"])]
+            matching = [var for pi, var in entries if member_matches(people[pi], rule)]
             model.add(sum(matching) >= rule["min_people"])
 
     # A/B/C/D are occupancy segments, not mandatory assignment bundles.

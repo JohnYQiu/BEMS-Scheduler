@@ -13,16 +13,17 @@ CUSTOM_PRIORITY_CATALOG = {
                  "campus": ["A", "B", "C", "D"],
                  "wellness": ["WAM", "WPM"]},
     "metrics": ["assignments", "covered_shifts", "hours"],
-    "member_filters": ["any", "driver", "evdt", "auth", "non_driver", "emt", "bert"],
+    "member_filters": ["any", "driver", "evdt", "auth", "non_driver", "emt", "bert", "attribute"],
     "directions": ["maximize", "minimize"],
 }
 CUSTOM_PRIORITY_KEYS = frozenset({"id", "label", "service", "metric", "member_filter",
                                   "provider", "weekdays", "shifts", "direction"})
+ATTRIBUTE_RULE_KEYS = frozenset({"member_attribute_field", "member_attribute_value"})
 MAX_CUSTOM_PRIORITIES = 24
 HARD_REQUIREMENT_CATALOG = {
     "services": {"ambulance": ["AM", "PM", "DAY", "NIGHT"],
                  "campus": ["A", "B", "C", "D"]},
-    "member_filters": ["any", "driver", "evdt", "auth", "non_driver", "emt", "bert"],
+    "member_filters": ["any", "driver", "evdt", "auth", "non_driver", "emt", "bert", "attribute"],
     "max_per_shift": 4,
 }
 HARD_REQUIREMENT_KEYS = frozenset({"id", "label", "service", "member_filter", "provider",
@@ -62,7 +63,7 @@ def validate_custom_priorities(value):
     seen = set()
     normalized = []
     for item in value:
-        if not isinstance(item, dict) or set(item) != CUSTOM_PRIORITY_KEYS:
+        if not isinstance(item, dict) or set(item) not in (CUSTOM_PRIORITY_KEYS, CUSTOM_PRIORITY_KEYS | ATTRIBUTE_RULE_KEYS):
             raise ValueError("Each custom priority needs id, label, service, metric, member_filter, provider, weekdays, shifts, and direction")
         identifier, label = item["id"], item["label"]
         if type(identifier) is not str or not CUSTOM_ID.fullmatch(identifier) or identifier in seen:
@@ -76,6 +77,7 @@ def validate_custom_priorities(value):
         for field in ("metric", "member_filter", "direction"):
             if item[field] not in CUSTOM_PRIORITY_CATALOG[field + "s"]:
                 raise ValueError(f"Unsupported custom priority {field}: {item[field]}")
+        _validate_attribute_filter(item)
         provider = item["provider"]
         if provider not in ("any", "ALS", "BLS") or (service != "ambulance" and provider != "any"):
             raise ValueError("ALS/BLS provider filters apply only to ambulance priorities")
@@ -97,7 +99,7 @@ def validate_hard_requirements(value):
         raise ValueError(f"hard_requirements must be a list of at most {MAX_HARD_REQUIREMENTS} items")
     seen, normalized = set(), []
     for item in value:
-        if not isinstance(item, dict) or set(item) != HARD_REQUIREMENT_KEYS:
+        if not isinstance(item, dict) or set(item) not in (HARD_REQUIREMENT_KEYS, HARD_REQUIREMENT_KEYS | ATTRIBUTE_RULE_KEYS):
             raise ValueError("Each hard requirement needs id, label, service, member_filter, provider, weekdays, shifts, and min_people")
         identifier, label = item["id"], item["label"]
         if type(identifier) is not str or not HARD_ID.fullmatch(identifier) or identifier in seen:
@@ -110,6 +112,7 @@ def validate_hard_requirements(value):
             raise ValueError(f"Unknown hard requirement service: {service}")
         if item["member_filter"] not in HARD_REQUIREMENT_CATALOG["member_filters"]:
             raise ValueError(f"Unsupported hard requirement member filter: {item['member_filter']}")
+        _validate_attribute_filter(item)
         provider = item["provider"]
         if provider not in ("any", "ALS", "BLS") or (service != "ambulance" and provider != "any"):
             raise ValueError("ALS/BLS provider filters apply only to ambulance hard requirements")
@@ -140,6 +143,24 @@ def _hard_requirement_member_match(person, selected):
     return not isinstance(person, Volunteer)
 
 
+def _validate_attribute_filter(item):
+    has_filter = item["member_filter"] == "attribute"
+    has_fields = ATTRIBUTE_RULE_KEYS.issubset(item)
+    if has_filter != has_fields:
+        raise ValueError("Attribute member filters need a roster field and value")
+    if has_fields and any(type(item[key]) is not str or not item[key].strip()
+                          for key in ATTRIBUTE_RULE_KEYS):
+        raise ValueError("Roster attribute field and value must be nonempty text")
+
+
+def member_matches(person, rule):
+    """Match a built-in role or one exact value from the imported roster."""
+    selected = rule["member_filter"]
+    if selected == "attribute":
+        return person.attributes.get(rule["member_attribute_field"]) == rule["member_attribute_value"]
+    return _hard_requirement_member_match(person, selected)
+
+
 def hard_requirement_warnings(requirements, people, providers, campus_keys, campus_capacity=2):
     """Heuristic preflight warnings based on per-shift availability only."""
     warnings = []
@@ -162,7 +183,7 @@ def hard_requirement_warnings(requirements, people, providers, campus_keys, camp
                 warnings.append(f"Hard requirement '{rule['label']}' cannot fit on {key[0]} {key[1]}: requires {rule['min_people']} people but shift capacity is {capacity}.")
             available = sum(
                 key in (person.available if rule["service"] == "ambulance" else person.campus_available)
-                and _hard_requirement_member_match(person, rule["member_filter"])
+                and member_matches(person, rule)
                 for person in people
             )
             if available < rule["min_people"]:

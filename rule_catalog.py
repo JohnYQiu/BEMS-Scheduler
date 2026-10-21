@@ -9,6 +9,8 @@ require rewriting the user interface.
 FIELD_CATALOG = [
     dict(path="/form_csv", label="Form responses file", group="Inputs", type="text",
          description="Local CSV or ZIP exported from the Google Form responses sheet. No live connection.", source="Google Form export, saved on this computer"),
+    dict(path="/member_attributes_csv", label="Roster attributes file (optional)", group="Inputs", type="text",
+         description="Optional CSV exported from the Roster tab. Use BrownEmail plus ClassYear, PrimaryStatus, RoleStatus, DriverRank, or other supported roster fields for custom member filters. After changing this path, save and reopen the editor to load its values.", source="Roster tab export, saved on this computer"),
     dict(path="/hours/ambulance_emt", label="Ambulance hours per EMT", group="Staffing limits", type="number",
          description="Target and hard maximum per EMT for this block; use a multiple of 6.", source="This block's policy configuration"),
     dict(path="/hours/campus_emt", label="Campus hours per EMT", group="Staffing limits", type="number",
