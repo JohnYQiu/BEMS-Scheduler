@@ -103,11 +103,13 @@ class BertMember:
     email: str
     certification: str = "BERT"
     campus_available: set[ShiftKey] = field(default_factory=set)
+    campus_soft_conflicts: set[ShiftKey] = field(default_factory=set)
     wellness_available: set[ShiftKey] = field(default_factory=set)
     blackout_slots: set[ShiftKey] = field(default_factory=set)
     blackout_dates: set[date] = field(default_factory=set)
     campus_assigned: list[ShiftKey] = field(default_factory=list)
     wellness_assigned: list[ShiftKey] = field(default_factory=list)
+    attributes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         self.email = self.email.strip().lower()

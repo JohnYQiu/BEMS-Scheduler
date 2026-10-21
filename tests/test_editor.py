@@ -78,6 +78,10 @@ class EditorTests(unittest.TestCase):
         with self.assertRaisesRegex(editor.EditorError, 'min_people must'):
             editor.save_config(self.path, version, submitted)
 
+    def test_new_roster_setting_is_available_for_older_config(self):
+        self.cfg.pop('member_attributes_csv', None)
+        self.assertIn('/member_attributes_csv', editor.scalar_paths(self.cfg))
+
     def test_supported_rule_can_be_added_and_removed(self):
         version, submitted = self.submission()
         submitted['optional_rules'] = {'/rules/wellness_shifts_per_week': 2}

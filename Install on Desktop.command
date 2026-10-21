@@ -1,15 +1,21 @@
 #!/bin/bash
-# Double-click from a downloaded/extracted BEMS-Scheduler folder. Never updates an existing installation.
+# Double-click from a downloaded/extracted BEMS-Scheduler folder. Updates preserve local data and keep a full rollback copy.
 set -euo pipefail
 
 pause() { printf '\nPress Return to close this window... '; read -r _answer || true; }
 fail() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 stage=''
+target=''
+backup=''
+updating=0
 finish() {
   status=$?
   trap - EXIT
+  if (( status != 0 )) && (( updating == 1 )) && [[ -n "$backup" && -d "$backup" && -n "$target" && ! -e "$target" ]]; then
+    mv -n -- "$backup" "$target" || printf 'Rollback copy remains at %s\n' "$backup" >&2
+  fi
   if [[ -n "$stage" && -d "$stage" ]]; then rm -rf -- "$stage"; fi
-  if (( status != 0 )); then printf '\nInstallation did not complete. Your existing Desktop files were not changed.\n' >&2; fi
+  if (( status != 0 )); then printf '\nInstallation did not complete. Any previous installation remains available or was restored.\n' >&2; fi
   pause
   exit "$status"
 }
@@ -20,17 +26,28 @@ desktop="$HOME/Desktop"
 target="$desktop/BEMS Scheduler"
 [[ -d "$desktop" ]] || fail "Desktop directory does not exist: $desktop"
 [[ -f "$source_dir/main.py" && -f "$source_dir/editor.py" && -f "$source_dir/editor.html" && -f "$source_dir/requirements.txt" && -f "$source_dir/config.json" ]] || fail 'Required project files are missing. Extract the complete repository first.'
-[[ ! -e "$target" && ! -L "$target" ]] || fail "The destination already exists: $target. Move or rename it yourself first; this installer will not overwrite it."
-printf 'Installing a separate clean copy at:\n  %s\n\n' "$target"
-printf 'Only program files, supplied configurations, documentation, and launchers are copied.\n'
-printf 'Local inputs, outputs, backups, .git, .venv, and *.local.json are not copied.\n'
+if [[ -e "$target" || -L "$target" ]]; then
+  [[ -d "$target" && ! -L "$target" && -f "$target/main.py" && -f "$target/config.json" ]] || fail "The destination exists but does not look like a BEMS Scheduler installation: $target"
+  updating=1
+  stamp=$(date '+%Y%m%d-%H%M%S')
+  backup="$desktop/BEMS Scheduler backup $stamp"
+  [[ ! -e "$backup" && ! -L "$backup" ]] || fail "A rollback folder already exists: $backup"
+  printf 'Updating the existing installation at:\n  %s\n\n' "$target"
+  printf 'Your config files, local inputs, outputs, backups, and other non-program files will be copied into the update.\n'
+  printf 'A complete rollback copy will be kept at:\n  %s\n\n' "$backup"
+else
+  printf 'Installing a separate clean copy at:\n  %s\n\n' "$target"
+  printf 'Only program files, supplied configurations, documentation, and launchers are copied.\n'
+  printf 'Local inputs, outputs, backups, .git, .venv, and *.local.json are not copied.\n'
+fi
 printf 'If needed, a private Python runtime will be downloaded and SHA-256 verified. Python dependencies also require internet access. No sudo or system-wide changes are used.\n\n'
-printf 'Continue? [y/N] '; read -r answer || fail 'No answer received.'
+if (( updating == 1 )); then printf 'Continue with update? [y/N] '; else printf 'Continue? [y/N] '; fi
+read -r answer || fail 'No answer received.'
 [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]] || { printf 'Canceled.\n'; exit 0; }
 
 stage=$(mktemp -d "$desktop/.BEMS-Scheduler-install.XXXXXXXX") || fail 'Could not create a temporary installation directory on Desktop.'
 # Explicit allowlist: never recursively copy arbitrary contents from an extracted folder.
-for file in main.py editor.py editor.html rule_catalog.py forces.py configuration.py models.py output.py parse_form.py policy.py solver.py validation.py requirements.txt config.json config_f26b3.json README.md OFFICER_GUIDE.md .gitignore 'Install on Desktop.command' 'Open BEMS Editor.command' 'Run Scheduler.command'; do
+for file in main.py editor.py editor.html rule_catalog.py member_attributes.py forces.py configuration.py models.py output.py parse_form.py policy.py solver.py validation.py requirements.txt config.json config_f26b3.json README.md OFFICER_GUIDE.md .gitignore 'Install on Desktop.command' 'Open BEMS Editor.command' 'Run Scheduler.command'; do
   if [[ -f "$source_dir/$file" && ! -L "$source_dir/$file" ]]; then
     cp -p -- "$source_dir/$file" "$stage/$file" || fail "Could not copy $file"
   elif [[ "$file" != config_f26b3.json && "$file" != README.md && "$file" != OFFICER_GUIDE.md && "$file" != .gitignore ]]; then
@@ -42,6 +59,18 @@ if [[ -d "$source_dir/tests" && ! -L "$source_dir/tests" ]]; then
   for test_file in "$source_dir"/tests/*.py; do
     [[ -f "$test_file" && ! -L "$test_file" ]] || continue
     cp -p -- "$test_file" "$stage/tests/$(basename -- "$test_file")"
+  done
+fi
+if (( updating == 1 )); then
+  # Carry user data forward, while replacing application files from the new source.
+  for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    name=$(basename -- "$entry")
+    case "$name" in
+      .venv|.git|tests|__pycache__|.DS_Store|main.py|editor.py|editor.html|rule_catalog.py|member_attributes.py|forces.py|configuration.py|models.py|output.py|parse_form.py|policy.py|solver.py|validation.py|requirements.txt|README.md|OFFICER_GUIDE.md|.gitignore|"Install on Desktop.command"|"Open BEMS Editor.command"|"Run Scheduler.command")
+        continue ;;
+    esac
+    cp -pR -- "$entry" "$stage/$name" || fail "Could not preserve existing local data: $name"
   done
 fi
 chmod +x "$stage"/*.command || fail 'Could not set launcher permissions.'
@@ -157,12 +186,24 @@ fi
 # venv console-script shebangs retain the staging path, so launchers and documented
 # commands invoke .venv/bin/python directly. The base Python stays at a stable path,
 # including the private runtime under Application Support when bootstrap was needed.
-[[ ! -e "$target" && ! -L "$target" ]] || fail "Destination appeared during setup: $target. Nothing was overwritten."
-# macOS mv -n refuses to replace a newly appeared target; check stage existence to detect a race.
-mv -n -- "$stage" "$target" || fail 'Could not move the prepared project into place.'
-[[ ! -e "$stage" ]] || fail "Destination appeared during setup: $target. Nothing was overwritten."
+if (( updating == 1 )); then
+  mv -n -- "$target" "$backup" || fail 'Could not move the existing installation to its rollback folder.'
+  [[ ! -e "$target" && -d "$backup" ]] || fail 'The existing installation changed during setup; no files were replaced.'
+  mv -n -- "$stage" "$target" || fail 'Could not move the updated project into place.'
+  [[ ! -e "$stage" ]] || fail 'Destination appeared during setup; no files were overwritten.'
+else
+  [[ ! -e "$target" && ! -L "$target" ]] || fail "Destination appeared during setup: $target. Nothing was overwritten."
+  # macOS mv -n refuses to replace a newly appeared target; check stage existence to detect a race.
+  mv -n -- "$stage" "$target" || fail 'Could not move the prepared project into place.'
+  [[ ! -e "$stage" ]] || fail "Destination appeared during setup: $target. Nothing was overwritten."
+fi
 stage=''
-printf '\nInstalled at %s\n' "$target"
+if (( updating == 1 )); then
+  printf '\nUpdated at %s\n' "$target"
+  printf 'Rollback copy: %s\n' "$backup"
+else
+  printf '\nInstalled at %s\n' "$target"
+fi
 printf 'Open the launchers inside that folder, or use the optional Desktop shortcuts below.\n'
 for file in 'Open BEMS Editor.command' 'Run Scheduler.command'; do
   shortcut="$desktop/$file"

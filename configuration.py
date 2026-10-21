@@ -41,6 +41,7 @@ class Configuration:
     custom_priorities: tuple[dict, ...] = ()
     max_evdt_als_shifts_per_week: int | None = None
     hard_requirements: tuple[dict, ...] = ()
+    member_attributes_csv: Path | None = None
 
     @property
     def requires_driver_status(self) -> bool:
@@ -187,6 +188,19 @@ def load_config(path: str | Path) -> Configuration:
 
     custom_priorities = validate_custom_priorities(cfg.get("custom_priorities", []))
     hard_requirements = validate_hard_requirements(cfg.get("hard_requirements", []))
+    raw_attributes_path = cfg.get("member_attributes_csv")
+    member_attributes_csv = local_path(raw_attributes_path) if raw_attributes_path else None
+    attribute_rules = [rule for rule in (*custom_priorities, *hard_requirements)
+                       if rule.get("member_filter") == "attribute"]
+    if attribute_rules:
+        if member_attributes_csv is None or not member_attributes_csv.is_file():
+            raise ValueError("Attribute-based rules require member_attributes_csv pointing to a roster CSV")
+        from member_attributes import load_attribute_catalog
+        catalog = load_attribute_catalog(member_attributes_csv)
+        for rule in attribute_rules:
+            field_name, value = rule.get("member_attribute_field"), rule.get("member_attribute_value")
+            if field_name not in catalog or value not in catalog[field_name]:
+                raise ValueError(f"Attribute rule uses unavailable roster value: {field_name}={value}")
     master = cfg.get("master_schedule_export", {})
     return Configuration(
         dates, providers, campus_keys, wellness_keys, wellness_capacity, caps, capacity, float(time_limit), workers,
@@ -202,4 +216,5 @@ def load_config(path: str | Path) -> Configuration:
         custom_priorities,
         max_evdt_als_shifts_per_week,
         hard_requirements,
+        member_attributes_csv,
     )
